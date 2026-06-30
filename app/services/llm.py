@@ -31,6 +31,25 @@ class SQLGeneration(BaseModel):
     sql_explanation: str = Field(..., min_length=1)
 
 
+class UnavailableLLMClient:
+    """LLM placeholder used when runtime config is incomplete."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def generate_sql(self, question: str, schema: str) -> SQLGeneration:
+        raise LLMError(self.message)
+
+    def analyze_result(
+        self,
+        question: str,
+        sql: str,
+        sql_explanation: str,
+        rows: list[dict[str, Any]],
+    ) -> str:
+        raise LLMError(self.message)
+
+
 class DeepSeekLLMClient:
     """DeepSeek OpenAI-compatible chat client."""
 

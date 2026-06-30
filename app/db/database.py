@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import random
 import sqlite3
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 ORDER_FIELD_DESCRIPTIONS = {
@@ -88,10 +89,18 @@ class SQLiteDatabase:
             cursor = conn.execute(sql)
             return [dict(row) for row in cursor.fetchall()]
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     @staticmethod
     def _reset_incompatible_schema(conn: sqlite3.Connection) -> None:
@@ -155,6 +164,79 @@ class SQLiteDatabase:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS query_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                question TEXT NOT NULL,
+                sql TEXT NOT NULL,
+                trusted_answer INTEGER NOT NULL,
+                chart_type TEXT NOT NULL,
+                row_count INTEGER NOT NULL,
+                error TEXT,
+                feedback TEXT,
+                feedback_note TEXT,
+                duration_ms INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        existing_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(query_logs)").fetchall()
+        }
+        if "feedback" not in existing_columns:
+            conn.execute("ALTER TABLE query_logs ADD COLUMN feedback TEXT")
+        if "feedback_note" not in existing_columns:
+            conn.execute("ALTER TABLE query_logs ADD COLUMN feedback_note TEXT")
+
+    def log_query(
+        self,
+        question: str,
+        sql: str,
+        trusted_answer: bool,
+        chart_type: str,
+        row_count: int,
+        error: str | None,
+        duration_ms: int,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO query_logs (
+                    question, sql, trusted_answer, chart_type, row_count, error, duration_ms
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (question, sql, int(trusted_answer), chart_type, row_count, error, duration_ms),
+            )
+
+    def list_query_logs(self, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 100))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id, question, sql, trusted_answer, chart_type, row_count,
+                    error, feedback, feedback_note, duration_ms, created_at
+                FROM query_logs
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_query_feedback(self, log_id: int, feedback: str, note: str | None = None) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE query_logs
+                SET feedback = ?, feedback_note = ?
+                WHERE id = ?
+                """,
+                (feedback, note, log_id),
+            )
+            return cursor.rowcount > 0
 
     def _seed_if_empty(self, conn: sqlite3.Connection) -> None:
         user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]

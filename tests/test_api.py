@@ -49,18 +49,34 @@ class FailingLLMClient:
         return "不应该执行到这里"
 
 
+class AnalyzeOnlyLLMClient:
+    def generate_sql(self, question: str, schema: str) -> SQLGeneration:
+        raise AssertionError("可信答案命中时不应该调用 SQL 生成")
+
+    def analyze_result(
+        self,
+        question: str,
+        sql: str,
+        sql_explanation: str,
+        rows: list[dict],
+    ) -> str:
+        return "可信 SQL 返回了商品销售额 Top 5。"
+
+
 def test_chat_returns_sql_data_and_chinese_answer(tmp_path):
     app = create_app(database_path=tmp_path / "chat.db", llm=FakeLLMClient())
     client = TestClient(app)
 
-    response = client.post("/api/chat", json={"question": "最近 30 天销售额最高的 5 个商品是什么？"})
+    response = client.post("/api/chat", json={"question": "请按商品统计销售额排名"})
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["question"] == "最近 30 天销售额最高的 5 个商品是什么？"
+    assert payload["question"] == "请按商品统计销售额排名"
     assert payload["sql"].upper().startswith("SELECT")
     assert payload["sql_explanation"] == "按商品名称分组，统计已支付订单销售额，并按销售额倒序取前 5 名。"
     assert payload["data"]
+    assert payload["trusted_answer"] is False
+    assert payload["chart"]["type"] == "bar"
     assert "Top 5" in payload["answer"]
     assert payload["error"] is None
 
@@ -83,10 +99,137 @@ def test_chat_returns_error_when_llm_fails(tmp_path):
     app = create_app(database_path=tmp_path / "llm-error.db", llm=FailingLLMClient())
     client = TestClient(app)
 
-    response = client.post("/api/chat", json={"question": "最近 30 天销售额最高的 5 个商品是什么？"})
+    response = client.post("/api/chat", json={"question": "请分析商品销售额排名"})
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["data"] == []
     assert payload["answer"] == ""
     assert "LLM 调用失败" in payload["error"]
+
+
+def test_chat_uses_trusted_answer_and_writes_query_log(tmp_path):
+    database_path = tmp_path / "trusted.db"
+    app = create_app(database_path=database_path, llm=AnalyzeOnlyLLMClient())
+    client = TestClient(app)
+
+    response = client.post("/api/chat", json={"question": "最近 30 天销售额最高的 5 个商品是什么？"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["trusted_answer"] is True
+    assert payload["chart"]["type"] == "bar"
+    assert payload["chart"]["x"] == "product_name"
+    assert payload["chart"]["y"] in {"total_amount", "total_sales"}
+    assert payload["data"]
+    assert payload["error"] is None
+
+    from app.db.database import SQLiteDatabase
+
+    db = SQLiteDatabase(database_path)
+    rows = db.execute_select(
+        """
+        SELECT question, trusted_answer, chart_type, row_count, error
+        FROM query_logs
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    )
+    assert rows[0]["question"] == "最近 30 天销售额最高的 5 个商品是什么？"
+    assert rows[0]["trusted_answer"] == 1
+    assert rows[0]["chart_type"] == "bar"
+    assert rows[0]["row_count"] == len(payload["data"])
+    assert rows[0]["error"] is None
+
+
+def test_query_logs_can_be_listed_and_feedback_can_be_saved(tmp_path):
+    database_path = tmp_path / "logs.db"
+    app = create_app(database_path=database_path, llm=AnalyzeOnlyLLMClient())
+    client = TestClient(app)
+
+    client.post("/api/chat", json={"question": "最近 30 天销售额最高的 5 个商品是什么？"})
+
+    logs_response = client.get("/api/query-logs")
+    assert logs_response.status_code == 200
+    logs_payload = logs_response.json()
+    assert logs_payload["items"]
+
+    log_id = logs_payload["items"][0]["id"]
+    feedback_response = client.post(
+        f"/api/query-logs/{log_id}/feedback",
+        json={"feedback": "like", "note": "结果准确"},
+    )
+
+    assert feedback_response.status_code == 200
+    assert feedback_response.json()["ok"] is True
+
+    updated_logs = client.get("/api/query-logs").json()["items"]
+    assert updated_logs[0]["feedback"] == "like"
+    assert updated_logs[0]["feedback_note"] == "结果准确"
+
+
+def test_query_log_feedback_returns_404_for_missing_log(tmp_path):
+    app = create_app(database_path=tmp_path / "missing-log.db", llm=FakeLLMClient())
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/query-logs/999/feedback",
+        json={"feedback": "dislike", "note": "不存在"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_health_returns_database_and_deepseek_status_without_api_key(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.main.DEEPSEEK_API_KEY", "sk-secret-value")
+    app = create_app(database_path=tmp_path / "health.db", llm=FakeLLMClient())
+    client = TestClient(app)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["database_status"] == "ok"
+    assert payload["deepseek_configured"] is True
+    assert payload["table_count"] >= 4
+    assert "sk-secret-value" not in response.text
+
+
+def test_health_treats_placeholder_deepseek_key_as_not_configured(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.main.DEEPSEEK_API_KEY", "your_deepseek_api_key")
+    app = create_app(database_path=tmp_path / "placeholder-health.db", llm=FakeLLMClient())
+    client = TestClient(app)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["deepseek_configured"] is False
+
+
+def test_app_can_start_without_deepseek_key(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.main.DEEPSEEK_API_KEY", "")
+    app = create_app(database_path=tmp_path / "no-key.db")
+    client = TestClient(app)
+
+    health = client.get("/health")
+    chat = client.post("/api/chat", json={"question": "请分析商品销售额排名"})
+
+    assert health.status_code == 200
+    assert health.json()["deepseek_configured"] is False
+    assert chat.status_code == 200
+    assert "DEEPSEEK_API_KEY" in chat.json()["error"]
+
+
+def test_security_policies_endpoint_returns_current_sql_rules(tmp_path):
+    app = create_app(database_path=tmp_path / "security.db", llm=FakeLLMClient())
+    client = TestClient(app)
+
+    response = client.get("/api/security/policies")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["allow_only_select"] is True
+    assert payload["forbid_select_star"] is True
+    assert payload["max_limit"] == 100
+    assert set(payload["allowed_tables"]) >= {"orders", "users", "products"}

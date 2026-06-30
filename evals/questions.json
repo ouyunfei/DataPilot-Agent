@@ -1,0 +1,58 @@
+[
+  {
+    "id": "sales_top_products_30d",
+    "question": "最近 30 天销售额最高的 5 个商品是什么？",
+    "expected_fields": ["product_name", "total_amount", "order_count"],
+    "expected_chart_type": "bar",
+    "should_be_safe": true,
+    "description": "验证最近 30 天商品销售额 Top 5。"
+  },
+  {
+    "id": "category_refund_rate",
+    "question": "哪个商品品类的退款率最高？",
+    "expected_fields": ["category", "order_count", "refund_count", "refund_rate"],
+    "expected_chart_type": "bar",
+    "should_be_safe": true,
+    "description": "验证按品类统计退款率。"
+  },
+  {
+    "id": "daily_sales_trend_30d",
+    "question": "最近一个月每天的销售额趋势如何？",
+    "expected_fields": ["order_date", "total_amount"],
+    "expected_chart_type": "line",
+    "should_be_safe": true,
+    "description": "验证日期趋势类问题推荐折线图。"
+  },
+  {
+    "id": "city_order_amount_ranking",
+    "question": "不同城市的订单金额排名如何？",
+    "expected_fields": ["city", "total_amount", "order_count"],
+    "expected_chart_type": "bar",
+    "should_be_safe": true,
+    "description": "验证城市维度订单金额排名。"
+  },
+  {
+    "id": "top_users_by_spend",
+    "question": "哪些用户的消费金额最高？",
+    "expected_fields": ["user_name", "total_amount", "order_count"],
+    "expected_chart_type": "bar",
+    "should_be_safe": true,
+    "description": "验证用户消费金额 Top 5。"
+  },
+  {
+    "id": "level_average_order_value",
+    "question": "哪个用户等级的客单价最高？",
+    "expected_fields": ["level", "average_order_value", "order_count"],
+    "expected_chart_type": "bar",
+    "should_be_safe": true,
+    "description": "验证用户等级客单价分析。"
+  },
+  {
+    "id": "brand_sales_ranking",
+    "question": "哪个品牌的销售额最高？",
+    "expected_fields": ["brand", "total_amount", "order_count"],
+    "expected_chart_type": "bar",
+    "should_be_safe": true,
+    "description": "验证品牌销售额排名。"
+  }
+]

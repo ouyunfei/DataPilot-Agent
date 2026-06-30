@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -7,6 +8,7 @@ from typing_extensions import TypedDict
 
 from app.db.database import SQLiteDatabase
 from app.services.llm import BaseLLMClient
+from app.services.semantic import build_semantic_context, find_trusted_answer, recommend_chart
 from app.services.sql_validator import SQLSafetyError, validate_select_sql
 
 
@@ -17,6 +19,8 @@ class AnalysisState(TypedDict, total=False):
     sql_explanation: str
     validated_sql: str
     data: list[dict[str, Any]]
+    chart: dict[str, str]
+    trusted_answer: bool
     answer: str
     error: str | None
 
@@ -30,7 +34,8 @@ class DataAnalysisAgent:
         self.graph = self._build_graph()
 
     def run(self, question: str) -> AnalysisState:
-        return self.graph.invoke(
+        started_at = time.perf_counter()
+        result = self.graph.invoke(
             {
                 "question": question,
                 "schema": "",
@@ -38,10 +43,23 @@ class DataAnalysisAgent:
                 "sql_explanation": "",
                 "validated_sql": "",
                 "data": [],
+                "chart": {},
+                "trusted_answer": False,
                 "answer": "",
                 "error": None,
             }
         )
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        self.db.log_query(
+            question=question,
+            sql=result.get("sql", ""),
+            trusted_answer=bool(result.get("trusted_answer")),
+            chart_type=result.get("chart", {}).get("type", ""),
+            row_count=len(result.get("data", [])),
+            error=result.get("error"),
+            duration_ms=duration_ms,
+        )
+        return result
 
     def _build_graph(self):
         workflow = StateGraph(AnalysisState)
@@ -69,9 +87,17 @@ class DataAnalysisAgent:
         return workflow.compile()
 
     def _retrieve_schema(self, state: AnalysisState) -> dict[str, str]:
-        return {"schema": self.db.get_schema_description()}
+        return {"schema": f"{self.db.get_schema_description()}\n\n{build_semantic_context()}"}
 
-    def _generate_sql(self, state: AnalysisState) -> dict[str, str]:
+    def _generate_sql(self, state: AnalysisState) -> dict[str, str | bool]:
+        trusted_answer = find_trusted_answer(state["question"])
+        if trusted_answer:
+            return {
+                "sql": trusted_answer["sql"],
+                "sql_explanation": trusted_answer["sql_explanation"],
+                "trusted_answer": True,
+            }
+
         try:
             generation = self.llm.generate_sql(
                 question=state["question"],
@@ -83,6 +109,7 @@ class DataAnalysisAgent:
         return {
             "sql": generation.sql.strip(),
             "sql_explanation": generation.sql_explanation.strip(),
+            "trusted_answer": False,
         }
 
     def _validate_sql(self, state: AnalysisState) -> dict[str, str | None]:
@@ -102,7 +129,7 @@ class DataAnalysisAgent:
         except Exception as exc:
             return {"data": [], "error": f"SQL 执行失败：{exc}"}
 
-        return {"data": rows, "error": None}
+        return {"data": rows, "chart": recommend_chart(rows), "error": None}
 
     def _analyze_result(self, state: AnalysisState) -> dict[str, str]:
         if state.get("error"):

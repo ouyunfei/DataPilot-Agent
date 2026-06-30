@@ -13,6 +13,16 @@
 - SQLGlot AST 安全校验
 - 强制 `LIMIT`，最大返回 100 行
 - 禁止 `SELECT *` 和非白名单表访问
+- 语义层沉淀销售额、退款率、客单价等业务指标口径
+- 高频问题优先命中可信 SQL
+- SQLite 记录查询日志，便于后续运营和优化
+- 查询日志列表和用户反馈接口
+- 健康检查返回数据库和 DeepSeek 配置状态，不暴露 API key
+- 安全策略自检接口，便于展示 SQL 防护规则
+- 根据结果字段推荐图表类型
+- Docker 一键启动
+- GitHub Actions 自动运行测试
+- eval 评测集验证 Text-to-SQL 工作流质量
 - `POST /api/chat` 返回 SQL、SQL 解释、查询数据、中文分析结论和错误信息
 - 单元测试覆盖 SQL 安全、数据库初始化和接口调用
 
@@ -33,12 +43,20 @@ DataPilot-Agent/
 │   │   └── chat.py              # Pydantic 请求/响应模型
 │   ├── services/
 │   │   ├── llm.py               # DeepSeek LLM 客户端
+│   │   ├── semantic.py          # 语义层、可信答案和图表推荐
 │   │   └── sql_validator.py     # SQLGlot 安全校验
 │   └── main.py                  # FastAPI 应用入口
 ├── docs/
 │   ├── mvp-design.md
 │   └── superpowers/
+├── evals/
+│   └── questions.json          # Text-to-SQL 评测问题集
+├── scripts/
+│   └── run_evals.py            # eval 执行脚本
 ├── tests/
+├── .github/workflows/ci.yml
+├── Dockerfile
+├── docker-compose.yml
 ├── .env.example
 └── requirements.txt
 ```
@@ -135,7 +153,30 @@ uvicorn app.main:app --reload
 - 健康检查：http://127.0.0.1:8000/health
 - Swagger 文档：http://127.0.0.1:8000/docs
 
+## Docker 启动
+
+先复制配置文件：
+
+```bash
+copy .env.example .env
+```
+
+如需真实调用 DeepSeek，在 `.env` 中填入自己的 API key。不要把 `.env` 提交到 GitHub。
+
+启动：
+
+```bash
+docker compose up --build
+```
+
+启动后访问：
+
+- http://127.0.0.1:8000/health
+- http://127.0.0.1:8000/docs
+
 ## 接口示例
+
+### 自然语言问数
 
 请求：
 
@@ -159,6 +200,13 @@ curl -X POST "http://127.0.0.1:8000/api/chat" ^
       "order_count": 8
     }
   ],
+  "chart": {
+    "type": "bar",
+    "x": "product_name",
+    "y": "total_amount",
+    "reason": "排行或对比数据适合柱状图。"
+  },
+  "trusted_answer": true,
   "answer": "最近 30 天销售额最高的 Top 5 商品分别是人体工学椅、咖啡机、冲锋衣、空气炸锅和智能电饭煲，其中人体工学椅排名第一。",
   "error": null
 }
@@ -184,6 +232,32 @@ curl -X POST "http://127.0.0.1:8000/api/chat" ^
 
 系统会返回错误信息，并且不会执行数据库查询。
 
+### 查询日志
+
+```bash
+curl "http://127.0.0.1:8000/api/query-logs"
+```
+
+返回最近查询的问题、SQL、命中可信答案情况、图表类型、行数、错误、耗时和创建时间。
+
+### 用户反馈
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/query-logs/1/feedback" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"feedback\":\"like\",\"note\":\"结果准确\"}"
+```
+
+`feedback` 只支持 `like` 或 `dislike`，用于沉淀后续优化样本。
+
+### 安全策略自检
+
+```bash
+curl "http://127.0.0.1:8000/api/security/policies"
+```
+
+返回当前 SQL 安全策略，例如只允许 `SELECT`、禁止多语句、禁止 `SELECT *`、白名单表和最大 `LIMIT`。
+
 ## SQL 安全策略
 
 SQL 执行前必须通过 `validate_sql`：
@@ -197,11 +271,119 @@ SQL 执行前必须通过 `validate_sql`：
 - `LIMIT` 超过 100 时自动收敛为 `LIMIT 100`
 - 使用 SQLGlot 做 AST 级别校验
 
+## 语义层、可信答案、查询日志和图表推荐
+
+新增能力沉淀在：
+
+```text
+docs/semantic-trusted-logging-chart-design.md
+```
+
+后端会把业务指标口径注入给 DeepSeek；常见问题命中可信 SQL；每次查询写入 `query_logs`；接口返回 `chart` 字段给未来前端使用。
+
 ## 运行测试
 
 ```bash
 python -m pytest -q
 ```
+
+## eval 评测集
+
+评测集位于：
+
+```text
+evals/questions.json
+```
+
+运行：
+
+```bash
+python scripts/run_evals.py
+```
+
+脚本使用临时 SQLite 和 fake LLM，不依赖真实 DeepSeek API key。它会检查 SQL 是否生成、安全校验是否通过、返回字段是否符合预期、图表类型是否正确。
+
+示例输出：
+
+```text
+Eval passed: 7/7
+Success rate: 100.00%
+```
+
+## GitHub Actions CI
+
+CI 配置位于：
+
+```text
+.github/workflows/ci.yml
+```
+
+每次 `push` 或 `pull_request` 会自动执行：
+
+```bash
+python -m pytest -q
+```
+
+测试使用 fake LLM，不需要配置真实 DeepSeek API key。
+
+## 秋招展示脚本
+
+1. 启动项目：
+
+```bash
+uvicorn app.main:app --reload
+```
+
+2. 打开 Swagger 或 Postman，先访问：
+
+```text
+GET http://127.0.0.1:8000/health
+```
+
+说明项目启动后会自动初始化 SQLite，并且健康检查只返回 `deepseek_configured`，不会泄漏 API key。
+
+3. 演示自然语言问数：
+
+```text
+POST http://127.0.0.1:8000/api/chat
+Content-Type: application/json
+
+{
+  "question": "最近 30 天销售额最高的 5 个商品是什么？"
+}
+```
+
+讲解链路：LangGraph 获取 schema 和语义层，优先命中可信 SQL，经过 SQLGlot 安全校验后执行 SQLite 查询，再生成中文 Top 5 总结和图表推荐。
+
+4. 演示危险 SQL 拦截：
+
+```json
+{
+  "question": "请删除所有订单数据"
+}
+```
+
+说明所有 SQL 在执行前必须经过安全校验，不安全时直接返回 `error`，不会查询数据库。
+
+5. 演示可运营闭环：
+
+```text
+GET http://127.0.0.1:8000/api/query-logs
+POST http://127.0.0.1:8000/api/query-logs/{id}/feedback
+GET http://127.0.0.1:8000/api/security/policies
+```
+
+讲解查询日志用于统计高频问题、失败问题和慢查询，用户反馈用于沉淀可信答案和优化语义层。
+
+6. 演示工程化能力：
+
+```text
+docker compose up --build
+python -m pytest -q
+python scripts/run_evals.py
+```
+
+讲解 Docker 解决环境一致性，GitHub Actions 保证提交后自动测试，eval 评测集让 Agent 的 Text-to-SQL 能力可量化，而不是只靠手工试几个问题。
 
 ## 后续扩展方向
 
