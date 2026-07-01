@@ -14,6 +14,8 @@ from app.services.sql_validator import SQLSafetyError, validate_select_sql
 
 class AnalysisState(TypedDict, total=False):
     question: str
+    session_id: str
+    session_context: str
     schema: str
     sql: str
     sql_explanation: str
@@ -33,11 +35,15 @@ class DataAnalysisAgent:
         self.llm = llm
         self.graph = self._build_graph()
 
-    def run(self, question: str) -> AnalysisState:
+    def run(self, question: str, session_id: str | None = None) -> AnalysisState:
+        session_id = self.db.create_session(session_id)
+        session_context = self.db.get_recent_session_context(session_id)
         started_at = time.perf_counter()
         result = self.graph.invoke(
             {
                 "question": question,
+                "session_id": session_id,
+                "session_context": session_context,
                 "schema": "",
                 "sql": "",
                 "sql_explanation": "",
@@ -59,6 +65,13 @@ class DataAnalysisAgent:
             error=result.get("error"),
             duration_ms=duration_ms,
         )
+        self.db.save_chat_message(
+            session_id=session_id,
+            question=question,
+            sql=result.get("sql", ""),
+            answer=result.get("answer", ""),
+        )
+        result["session_id"] = session_id
         return result
 
     def _build_graph(self):
@@ -87,7 +100,10 @@ class DataAnalysisAgent:
         return workflow.compile()
 
     def _retrieve_schema(self, state: AnalysisState) -> dict[str, str]:
-        return {"schema": f"{self.db.get_schema_description()}\n\n{build_semantic_context()}"}
+        schema = f"{self.db.get_schema_description()}\n\n{build_semantic_context()}"
+        if state.get("session_context"):
+            schema = f"{schema}\n\n{state['session_context']}"
+        return {"schema": schema}
 
     def _generate_sql(self, state: AnalysisState) -> dict[str, str | bool]:
         trusted_answer = find_trusted_answer(state["question"])

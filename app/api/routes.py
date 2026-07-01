@@ -7,6 +7,7 @@ from app.schemas.chat import (
     FeedbackResponse,
     QueryLogFeedbackRequest,
     QueryLogListResponse,
+    QueryStatsResponse,
     SecurityPolicyResponse,
 )
 from app.services.sql_validator import ALLOWED_TABLES, FORBIDDEN_KEYWORDS, MAX_LIMIT
@@ -17,9 +18,10 @@ def create_chat_router(agent: DataAnalysisAgent) -> APIRouter:
 
     @router.post("/chat", response_model=ChatResponse)
     def chat(request: ChatRequest) -> ChatResponse:
-        result = agent.run(request.question)
+        result = agent.run(request.question, session_id=request.session_id)
         return ChatResponse(
             question=request.question,
+            session_id=result.get("session_id", ""),
             sql=result.get("sql", ""),
             sql_explanation=result.get("sql_explanation", ""),
             data=result.get("data", []),
@@ -32,6 +34,10 @@ def create_chat_router(agent: DataAnalysisAgent) -> APIRouter:
     @router.get("/query-logs", response_model=QueryLogListResponse)
     def query_logs(limit: int = Query(default=20, ge=1, le=100)) -> QueryLogListResponse:
         return QueryLogListResponse(items=agent.db.list_query_logs(limit=limit))
+
+    @router.get("/query-stats", response_model=QueryStatsResponse)
+    def query_stats() -> QueryStatsResponse:
+        return QueryStatsResponse(**agent.db.get_query_stats())
 
     @router.post("/query-logs/{log_id}/feedback", response_model=FeedbackResponse)
     def save_query_feedback(

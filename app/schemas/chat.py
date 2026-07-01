@@ -6,10 +6,12 @@ from pydantic import BaseModel, Field
 
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, description="用户的自然语言数据分析问题")
+    session_id: str | None = Field(default=None, description="多轮追问会话 ID")
 
 
 class ChatResponse(BaseModel):
     question: str
+    session_id: str = ""
     sql: str = ""
     sql_explanation: str = ""
     data: list[dict[str, Any]] = Field(default_factory=list)
@@ -44,6 +46,22 @@ class QueryLogFeedbackRequest(BaseModel):
 
 class FeedbackResponse(BaseModel):
     ok: bool
+
+
+class TopQuestionItem(BaseModel):
+    question: str
+    count: int
+
+
+class QueryStatsResponse(BaseModel):
+    total_queries: int
+    success_queries: int
+    failed_queries: int
+    trusted_answer_queries: int
+    average_duration_ms: float
+    chart_type_counts: dict[str, int] = Field(default_factory=dict)
+    feedback_counts: dict[str, int] = Field(default_factory=dict)
+    top_questions: list[TopQuestionItem] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):

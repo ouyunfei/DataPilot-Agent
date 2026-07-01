@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
@@ -188,6 +189,28 @@ class SQLiteDatabase:
             conn.execute("ALTER TABLE query_logs ADD COLUMN feedback TEXT")
         if "feedback_note" not in existing_columns:
             conn.execute("ALTER TABLE query_logs ADD COLUMN feedback_note TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                question TEXT NOT NULL,
+                sql TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id) REFERENCES chat_sessions(id)
+            )
+            """
+        )
 
     def log_query(
         self,
@@ -237,6 +260,119 @@ class SQLiteDatabase:
                 (feedback, note, log_id),
             )
             return cursor.rowcount > 0
+
+    def create_session(self, session_id: str | None = None) -> str:
+        session_id = session_id or str(uuid.uuid4())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO chat_sessions (id)
+                VALUES (?)
+                """,
+                (session_id,),
+            )
+            conn.execute(
+                """
+                UPDATE chat_sessions
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (session_id,),
+            )
+        return session_id
+
+    def save_chat_message(self, session_id: str, question: str, sql: str, answer: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_messages (session_id, question, sql, answer)
+                VALUES (?, ?, ?, ?)
+                """,
+                (session_id, question, sql, answer),
+            )
+            conn.execute(
+                """
+                UPDATE chat_sessions
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (session_id,),
+            )
+
+    def get_recent_session_context(self, session_id: str, limit: int = 3) -> str:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT question, sql, answer
+                FROM chat_messages
+                WHERE session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (session_id, max(1, min(limit, 10))),
+            ).fetchall()
+
+        if not rows:
+            return ""
+
+        lines = ["最近会话上下文："]
+        for row in reversed(rows):
+            lines.append(f"- 用户问题：{row['question']}")
+            lines.append(f"  SQL：{row['sql']}")
+            lines.append(f"  回答：{row['answer']}")
+        return "\n".join(lines)
+
+    def get_query_stats(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            summary = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_queries,
+                    SUM(CASE WHEN error IS NULL THEN 1 ELSE 0 END) AS success_queries,
+                    SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS failed_queries,
+                    SUM(trusted_answer) AS trusted_answer_queries,
+                    COALESCE(ROUND(AVG(duration_ms), 2), 0) AS average_duration_ms
+                FROM query_logs
+                """
+            ).fetchone()
+            chart_rows = conn.execute(
+                """
+                SELECT chart_type, COUNT(*) AS count
+                FROM query_logs
+                WHERE chart_type != ''
+                GROUP BY chart_type
+                ORDER BY count DESC
+                """
+            ).fetchall()
+            feedback_rows = conn.execute(
+                """
+                SELECT feedback, COUNT(*) AS count
+                FROM query_logs
+                WHERE feedback IS NOT NULL
+                GROUP BY feedback
+                ORDER BY count DESC
+                """
+            ).fetchall()
+            question_rows = conn.execute(
+                """
+                SELECT question, COUNT(*) AS count
+                FROM query_logs
+                GROUP BY question
+                ORDER BY count DESC, question ASC
+                LIMIT 5
+                """
+            ).fetchall()
+
+        return {
+            "total_queries": summary["total_queries"] or 0,
+            "success_queries": summary["success_queries"] or 0,
+            "failed_queries": summary["failed_queries"] or 0,
+            "trusted_answer_queries": summary["trusted_answer_queries"] or 0,
+            "average_duration_ms": summary["average_duration_ms"] or 0,
+            "chart_type_counts": {row["chart_type"]: row["count"] for row in chart_rows},
+            "feedback_counts": {row["feedback"]: row["count"] for row in feedback_rows},
+            "top_questions": [dict(row) for row in question_rows],
+        }
 
     def _seed_if_empty(self, conn: sqlite3.Connection) -> None:
         user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]

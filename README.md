@@ -17,6 +17,8 @@
 - 高频问题优先命中可信 SQL
 - SQLite 记录查询日志，便于后续运营和优化
 - 查询日志列表和用户反馈接口
+- 多轮追问：返回并复用 `session_id`，把最近会话上下文注入 SQL 生成
+- 查询统计接口：统计成功率、失败数、图表类型分布和高频问题
 - 健康检查返回数据库和 DeepSeek 配置状态，不暴露 API key
 - 安全策略自检接口，便于展示 SQL 防护规则
 - 根据结果字段推荐图表类型
@@ -191,6 +193,7 @@ curl -X POST "http://127.0.0.1:8000/api/chat" ^
 ```json
 {
   "question": "最近 30 天销售额最高的 5 个商品是什么？",
+  "session_id": "0b6f6a50-6f8d-4b2f-a1af-b1f8db663ab4",
   "sql": "SELECT product_name, ROUND(SUM(amount), 2) AS total_amount, COUNT(*) AS order_count FROM orders WHERE status = 'paid' GROUP BY product_name ORDER BY total_amount DESC LIMIT 5",
   "sql_explanation": "按商品名称分组，统计已支付订单销售额，并按销售额倒序取前 5 名。",
   "data": [
@@ -209,6 +212,15 @@ curl -X POST "http://127.0.0.1:8000/api/chat" ^
   "trusted_answer": true,
   "answer": "最近 30 天销售额最高的 Top 5 商品分别是人体工学椅、咖啡机、冲锋衣、空气炸锅和智能电饭煲，其中人体工学椅排名第一。",
   "error": null
+}
+```
+
+多轮追问时，把上一次响应里的 `session_id` 带回去：
+
+```json
+{
+  "question": "那按城市拆开看呢？",
+  "session_id": "0b6f6a50-6f8d-4b2f-a1af-b1f8db663ab4"
 }
 ```
 
@@ -239,6 +251,14 @@ curl "http://127.0.0.1:8000/api/query-logs"
 ```
 
 返回最近查询的问题、SQL、命中可信答案情况、图表类型、行数、错误、耗时和创建时间。
+
+### 查询统计
+
+```bash
+curl "http://127.0.0.1:8000/api/query-stats"
+```
+
+返回总查询数、成功数、失败数、可信答案命中数、平均耗时、图表类型分布、反馈分布和高频问题，用于展示 Agent 的运营监控能力。
 
 ### 用户反馈
 
@@ -369,11 +389,12 @@ Content-Type: application/json
 
 ```text
 GET http://127.0.0.1:8000/api/query-logs
+GET http://127.0.0.1:8000/api/query-stats
 POST http://127.0.0.1:8000/api/query-logs/{id}/feedback
 GET http://127.0.0.1:8000/api/security/policies
 ```
 
-讲解查询日志用于统计高频问题、失败问题和慢查询，用户反馈用于沉淀可信答案和优化语义层。
+讲解查询日志和统计接口用于观察高频问题、失败问题、慢查询和图表使用分布，用户反馈用于沉淀可信答案和优化语义层。
 
 6. 演示工程化能力：
 

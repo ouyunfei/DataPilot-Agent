@@ -17,6 +17,8 @@
 - 语义层业务指标口径
 - 可信 SQL 命中
 - 查询日志
+- 多轮追问会话上下文
+- 查询统计接口
 - 图表推荐
 - Top 5 多行中文结果总结
 - FastAPI 接口输出结构化结果
@@ -33,6 +35,8 @@
 - 接收 `ChatRequest`
 - 调用 `DataAnalysisAgent`
 - 返回包含 `sql_explanation` 的 `ChatResponse`
+- 支持传入 `session_id` 进行多轮追问
+- 提供 `GET /api/query-stats` 查询运营统计指标
 
 ### Agent 工作流层
 
@@ -103,6 +107,7 @@ START
 - 条件边根据 `error` 决定是否跳过 `execute_sql`
 - `analyze_result` 统一负责最终中文回答，错误场景返回空回答
 - `run` 结束后写入查询日志，记录问题、SQL、命中情况、图表类型、行数、错误和耗时
+- `run` 会创建或复用 `session_id`，把最近会话上下文注入 schema prompt
 
 ## 5. 语义层与可信答案
 
@@ -162,6 +167,17 @@ START
 
 查询日志写入 SQLite `query_logs` 表，便于后续统计高频问题、失败问题和慢查询。
 
+多轮追问使用 `chat_sessions` 和 `chat_messages` 表保存最近问答。用户第一次请求不需要传 `session_id`，后端会自动生成；后续追问带上同一个 `session_id`，Agent 会把最近 3 条上下文交给 SQL 生成节点。
+
+查询统计接口 `GET /api/query-stats` 基于 `query_logs` 聚合：
+
+- 总查询数、成功查询数、失败查询数
+- 可信答案命中数
+- 平均耗时
+- 图表类型分布
+- 用户反馈分布
+- Top 5 高频问题
+
 ## 9. 示例业务问题覆盖
 
 - 最近 30 天销售额最高的 5 个商品是什么？
@@ -180,6 +196,8 @@ START
 - DeepSeek 负责生成 SQL、解释 SQL 和总结结果
 - 可信 SQL 和语义层降低大模型随机性
 - 查询日志体现可运营能力
+- 多轮追问体现 Agent 上下文理解能力
+- 查询统计接口体现运营监控和效果分析能力
 - 图表推荐为后续前端可视化预留接口
 - SQL 执行前有 SQLGlot AST 安全校验，体现后端风险意识
 - LLM、数据库、API、校验逻辑分层清晰，适合后续替换和扩展
@@ -193,4 +211,4 @@ START
 3. 使用 Redis 缓存 schema、热门查询和会话状态。
 4. 使用 Celery 支持异步长查询和定时报表。
 5. 拆分多智能体：Schema Agent、SQL Agent、SQL Review Agent、Insight Agent。
-6. Docker 化并补充 CI 流程。
+6. 增加异常趋势发现、图表配置和更完整的统计看板接口。

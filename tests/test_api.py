@@ -5,7 +5,11 @@ from app.services.llm import SQLGeneration
 
 
 class FakeLLMClient:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
     def generate_sql(self, question: str, schema: str) -> SQLGeneration:
+        self.prompts.append(schema)
         if "删除" in question:
             return SQLGeneration(sql="DELETE FROM orders", sql_explanation="尝试删除订单数据。")
 
@@ -79,6 +83,7 @@ def test_chat_returns_sql_data_and_chinese_answer(tmp_path):
     assert payload["chart"]["type"] == "bar"
     assert "Top 5" in payload["answer"]
     assert payload["error"] is None
+    assert payload["session_id"]
 
 
 def test_chat_returns_error_when_generated_sql_is_unsafe(tmp_path):
@@ -233,3 +238,39 @@ def test_security_policies_endpoint_returns_current_sql_rules(tmp_path):
     assert payload["forbid_select_star"] is True
     assert payload["max_limit"] == 100
     assert set(payload["allowed_tables"]) >= {"orders", "users", "products"}
+
+
+def test_chat_reuses_session_and_injects_recent_context(tmp_path):
+    llm = FakeLLMClient()
+    app = create_app(database_path=tmp_path / "session.db", llm=llm)
+    client = TestClient(app)
+
+    first = client.post("/api/chat", json={"question": "请按商品统计销售额排名"}).json()
+    second = client.post(
+        "/api/chat",
+        json={"question": "那按城市拆开看呢？", "session_id": first["session_id"]},
+    ).json()
+
+    assert second["session_id"] == first["session_id"]
+    assert len(llm.prompts) == 2
+    assert "最近会话上下文" in llm.prompts[1]
+    assert "请按商品统计销售额排名" in llm.prompts[1]
+
+
+def test_query_stats_returns_operational_metrics(tmp_path):
+    app = create_app(database_path=tmp_path / "stats.db", llm=FakeLLMClient())
+    client = TestClient(app)
+
+    client.post("/api/chat", json={"question": "请按商品统计销售额排名"})
+    client.post("/api/chat", json={"question": "请删除所有订单数据"})
+
+    response = client.get("/api/query-stats")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_queries"] == 2
+    assert payload["success_queries"] == 1
+    assert payload["failed_queries"] == 1
+    assert payload["average_duration_ms"] >= 0
+    assert payload["chart_type_counts"]["bar"] == 1
+    assert payload["top_questions"]
