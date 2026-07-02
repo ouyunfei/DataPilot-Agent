@@ -29,7 +29,8 @@ ALLOWED_TABLES = {"orders", "users", "products"}
 MAX_LIMIT = 100
 
 
-def validate_select_sql(sql: str) -> str:
+def validate_select_sql(sql: str, allowed_tables: set[str] | None = None) -> str:
+    allowed_tables = ALLOWED_TABLES if allowed_tables is None else allowed_tables
     normalized = sql.strip()
     if not normalized:
         raise SQLSafetyError("SQL 不安全：只允许执行 SELECT 查询")
@@ -62,7 +63,7 @@ def validate_select_sql(sql: str) -> str:
         raise SQLSafetyError("SQL 不安全：禁止使用 SELECT *")
 
     table_names = {table.name.lower() for table in expression.find_all(exp.Table)}
-    disallowed_tables = table_names - ALLOWED_TABLES
+    disallowed_tables = table_names - {table.lower() for table in allowed_tables}
     if disallowed_tables:
         names = "、".join(sorted(disallowed_tables))
         raise SQLSafetyError(f"SQL 不安全：禁止访问非白名单表 {names}")

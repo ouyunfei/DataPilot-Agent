@@ -67,6 +67,27 @@ class AnalyzeOnlyLLMClient:
         return "可信 SQL 返回了商品销售额 Top 5。"
 
 
+class UsersTableLLMClient:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def generate_sql(self, question: str, schema: str) -> SQLGeneration:
+        self.prompts.append(schema)
+        return SQLGeneration(
+            sql="SELECT id, name FROM users LIMIT 5",
+            sql_explanation="查询用户表。",
+        )
+
+    def analyze_result(
+        self,
+        question: str,
+        sql: str,
+        sql_explanation: str,
+        rows: list[dict],
+    ) -> str:
+        return "用户查询结果。"
+
+
 def test_chat_returns_sql_data_and_chinese_answer(tmp_path):
     app = create_app(database_path=tmp_path / "chat.db", llm=FakeLLMClient())
     client = TestClient(app)
@@ -81,7 +102,9 @@ def test_chat_returns_sql_data_and_chinese_answer(tmp_path):
     assert payload["data"]
     assert payload["trusted_answer"] is False
     assert payload["chart"]["type"] == "bar"
+    assert payload["insights"]
     assert "Top 5" in payload["answer"]
+    assert payload["insights"][0]["message"] in payload["answer"]
     assert payload["error"] is None
     assert payload["session_id"]
 
@@ -238,6 +261,108 @@ def test_security_policies_endpoint_returns_current_sql_rules(tmp_path):
     assert payload["forbid_select_star"] is True
     assert payload["max_limit"] == 100
     assert set(payload["allowed_tables"]) >= {"orders", "users", "products"}
+
+
+def test_data_sources_can_be_created_listed_and_tested(tmp_path):
+    database_path = tmp_path / "data-sources.db"
+    app = create_app(database_path=database_path, llm=FakeLLMClient())
+    client = TestClient(app)
+
+    default_sources = client.get("/api/data-sources").json()["items"]
+    create_response = client.post(
+        "/api/data-sources",
+        json={
+            "name": "orders_only",
+            "db_type": "sqlite",
+            "database_url": str(database_path),
+            "allowed_tables": ["orders"],
+        },
+    )
+
+    assert create_response.status_code == 200
+    created = create_response.json()
+    assert created["name"] == "orders_only"
+    assert created["allowed_tables"] == ["orders"]
+    assert any(source["name"] == "default_sqlite" for source in default_sources)
+
+    listed = client.get("/api/data-sources").json()["items"]
+    assert any(source["name"] == "orders_only" for source in listed)
+
+    test_response = client.post(f"/api/data-sources/{created['id']}/test")
+    assert test_response.status_code == 200
+    assert test_response.json()["ok"] is True
+
+
+def test_postgresql_data_source_config_does_not_require_external_connection(tmp_path):
+    app = create_app(database_path=tmp_path / "postgres-config.db", llm=FakeLLMClient())
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/data-sources",
+        json={
+            "name": "warehouse_pg",
+            "db_type": "postgresql",
+            "database_url": "postgresql://user:password@localhost:5432/warehouse",
+            "allowed_tables": ["orders"],
+        },
+    ).json()
+
+    test_response = client.post(f"/api/data-sources/{created['id']}/test")
+
+    assert test_response.status_code == 200
+    assert test_response.json()["ok"] is True
+    assert "真实连接待后续接入驱动" in test_response.json()["message"]
+
+
+def test_chat_uses_data_source_table_whitelist(tmp_path):
+    llm = UsersTableLLMClient()
+    database_path = tmp_path / "table-whitelist.db"
+    app = create_app(database_path=database_path, llm=llm)
+    client = TestClient(app)
+    source = client.post(
+        "/api/data-sources",
+        json={
+            "name": "orders_only",
+            "db_type": "sqlite",
+            "database_url": str(database_path),
+            "allowed_tables": ["orders"],
+        },
+    ).json()
+
+    response = client.post(
+        "/api/chat",
+        json={"question": "查一下用户列表", "data_source_id": source["id"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["data_source_id"] == source["id"]
+    assert payload["data"] == []
+    assert "users" in payload["error"]
+    assert "表：users" not in llm.prompts[0]
+    assert "users.id" not in llm.prompts[0]
+    assert "products.id" not in llm.prompts[0]
+    assert "products.cost_price" not in llm.prompts[0]
+
+
+def test_security_policies_can_use_data_source_whitelist(tmp_path):
+    database_path = tmp_path / "policy-source.db"
+    app = create_app(database_path=database_path, llm=FakeLLMClient())
+    client = TestClient(app)
+    source = client.post(
+        "/api/data-sources",
+        json={
+            "name": "orders_only",
+            "db_type": "sqlite",
+            "database_url": str(database_path),
+            "allowed_tables": ["orders"],
+        },
+    ).json()
+
+    response = client.get(f"/api/security/policies?data_source_id={source['id']}")
+
+    assert response.status_code == 200
+    assert response.json()["allowed_tables"] == ["orders"]
 
 
 def test_chat_reuses_session_and_injects_recent_context(tmp_path):

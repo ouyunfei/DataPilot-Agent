@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import sqlite3
 import uuid
+import json
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
@@ -52,20 +53,25 @@ class SQLiteDatabase:
             self._reset_incompatible_schema(conn)
             self._create_tables(conn)
             self._seed_if_empty(conn)
+            self._seed_default_data_source(conn)
 
-    def get_schema_description(self) -> str:
+    def get_schema_description(self, allowed_tables: list[str] | None = None) -> str:
         table_descriptions = {
             "orders": ("订单事实表", ORDER_FIELD_DESCRIPTIONS),
             "users": ("用户维度表", USER_FIELD_DESCRIPTIONS),
             "products": ("商品维度表", PRODUCT_FIELD_DESCRIPTIONS),
         }
-        lines = [
-            "数据库包含 3 张业务表：orders、users、products。",
-            "表关系：orders.user_id = users.id；orders.product_id = products.id。",
-        ]
+        selected_tables = set(allowed_tables or table_descriptions.keys())
+        lines = [f"当前允许查询的业务表：{'、'.join(sorted(selected_tables))}。"]
+        if {"orders", "users"} <= selected_tables:
+            lines.append("表关系：orders.user_id = users.id。")
+        if {"orders", "products"} <= selected_tables:
+            lines.append("表关系：orders.product_id = products.id。")
 
         with self._connect() as conn:
             for table_name, (table_comment, field_descriptions) in table_descriptions.items():
+                if table_name not in selected_tables:
+                    continue
                 columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
                 lines.append("")
                 lines.append(f"表：{table_name}（{table_comment}）")
@@ -74,6 +80,10 @@ class SQLiteDatabase:
                     name = column["name"]
                     column_type = column["type"]
                     description = field_descriptions.get(name, "")
+                    if name == "user_id" and "users" not in selected_tables:
+                        description = "用户 ID"
+                    if name == "product_id" and "products" not in selected_tables:
+                        description = "商品 ID"
                     lines.append(f"- {name} ({column_type})：{description}")
 
         return "\n".join(lines)
@@ -85,14 +95,14 @@ class SQLiteDatabase:
             ).fetchall()
             return [row["name"] for row in rows]
 
-    def execute_select(self, sql: str) -> list[dict[str, Any]]:
-        with self._connect() as conn:
+    def execute_select(self, sql: str, database_url: str | None = None) -> list[dict[str, Any]]:
+        with self._connect(database_url) as conn:
             cursor = conn.execute(sql)
             return [dict(row) for row in cursor.fetchall()]
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path)
+    def _connect(self, path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(path or self.path)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -211,6 +221,144 @@ class SQLiteDatabase:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS data_sources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                db_type TEXT NOT NULL,
+                database_url TEXT NOT NULL,
+                allowed_tables TEXT NOT NULL,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+    def _seed_default_data_source(self, conn: sqlite3.Connection) -> None:
+        exists = conn.execute("SELECT 1 FROM data_sources WHERE is_default = 1").fetchone()
+        if exists:
+            return
+
+        conn.execute(
+            """
+            INSERT INTO data_sources (name, db_type, database_url, allowed_tables, is_default)
+            VALUES (?, ?, ?, ?, 1)
+            """,
+            (
+                "default_sqlite",
+                "sqlite",
+                str(self.path),
+                json.dumps(["orders", "users", "products"], ensure_ascii=False),
+            ),
+        )
+
+    def create_data_source(
+        self,
+        name: str,
+        db_type: str,
+        database_url: str,
+        allowed_tables: list[str],
+        is_default: bool = False,
+    ) -> dict[str, Any]:
+        db_type = db_type.lower()
+        if db_type not in {"sqlite", "mysql", "postgresql"}:
+            raise ValueError("db_type 只支持 sqlite、mysql、postgresql")
+
+        tables = [table.strip().lower() for table in allowed_tables if table.strip()]
+        if not tables:
+            raise ValueError("allowed_tables 不能为空")
+
+        with self._connect() as conn:
+            if is_default:
+                conn.execute("UPDATE data_sources SET is_default = 0")
+            cursor = conn.execute(
+                """
+                INSERT INTO data_sources (name, db_type, database_url, allowed_tables, is_default)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (name, db_type, database_url, json.dumps(tables, ensure_ascii=False), int(is_default)),
+            )
+            source_id = cursor.lastrowid
+
+        source = self.get_data_source(source_id)
+        if source is None:
+            raise ValueError("数据源创建失败")
+        return source
+
+    def list_data_sources(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, name, db_type, database_url, allowed_tables, is_default, created_at
+                FROM data_sources
+                ORDER BY is_default DESC, id ASC
+                """
+            ).fetchall()
+            return [self._data_source_from_row(row) for row in rows]
+
+    def get_data_source(self, source_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, name, db_type, database_url, allowed_tables, is_default, created_at
+                FROM data_sources
+                WHERE id = ?
+                """,
+                (source_id,),
+            ).fetchone()
+            return self._data_source_from_row(row) if row else None
+
+    def get_default_data_source(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, name, db_type, database_url, allowed_tables, is_default, created_at
+                FROM data_sources
+                WHERE is_default = 1
+                ORDER BY id ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                raise ValueError("默认数据源不存在")
+            return self._data_source_from_row(row)
+
+    def test_data_source(self, source_id: int) -> dict[str, Any]:
+        source = self.get_data_source(source_id)
+        if source is None:
+            return {"ok": False, "message": "数据源不存在"}
+
+        if source["db_type"] != "sqlite":
+            return {"ok": True, "message": "配置已保存，真实连接待后续接入驱动"}
+
+        try:
+            with self._connect(source["database_url"]) as conn:
+                existing_tables = {
+                    row["name"]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+        except Exception as exc:
+            return {"ok": False, "message": f"SQLite 连接失败：{exc}"}
+
+        missing = set(source["allowed_tables"]) - existing_tables
+        if missing:
+            return {"ok": False, "message": f"白名单表不存在：{'、'.join(sorted(missing))}"}
+        return {"ok": True, "message": "SQLite 数据源连接正常"}
+
+    @staticmethod
+    def _data_source_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "db_type": row["db_type"],
+            "database_url": row["database_url"],
+            "allowed_tables": json.loads(row["allowed_tables"]),
+            "is_default": bool(row["is_default"]),
+            "created_at": row["created_at"],
+        }
 
     def log_query(
         self,

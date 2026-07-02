@@ -65,9 +65,13 @@ TRUSTED_ANSWERS = {
 }
 
 
-def build_semantic_context() -> str:
+def build_semantic_context(allowed_tables: list[str] | None = None) -> str:
+    allowed = set(allowed_tables or ["orders", "users", "products"])
     lines = ["业务语义层指标："]
     for metric in METRICS.values():
+        expression = metric["expression"]
+        if any(f"{table}." in expression for table in {"orders", "users", "products"} - allowed):
+            continue
         lines.append(f"- {metric['name']}：{metric['description']}计算口径：{metric['expression']}")
     return "\n".join(lines)
 

@@ -51,3 +51,19 @@ def test_validate_select_sql_caps_large_limit():
     validated = validate_select_sql("SELECT id, product_name FROM orders LIMIT 1000")
 
     assert validated.endswith("LIMIT 100")
+
+
+def test_validate_select_sql_uses_dynamic_allowed_tables():
+    validated = validate_select_sql(
+        "SELECT id, product_name FROM orders LIMIT 5",
+        allowed_tables={"orders"},
+    )
+    assert validated.upper().startswith("SELECT")
+
+    with pytest.raises(SQLSafetyError) as exc:
+        validate_select_sql("SELECT id, name FROM users LIMIT 5", allowed_tables={"orders"})
+
+    assert "users" in str(exc.value)
+
+    with pytest.raises(SQLSafetyError):
+        validate_select_sql("SELECT id FROM orders LIMIT 5", allowed_tables=set())

@@ -13,6 +13,8 @@
 - DeepSeek SQL 自动生成
 - SQL 解释生成
 - SQLGlot AST 安全校验
+- 数据源配置管理
+- 数据源级表权限白名单
 - SQLite 查询执行
 - 语义层业务指标口径
 - 可信 SQL 命中
@@ -20,6 +22,7 @@
 - 多轮追问会话上下文
 - 查询统计接口
 - 图表推荐
+- 异常 / 趋势发现
 - Top 5 多行中文结果总结
 - FastAPI 接口输出结构化结果
 
@@ -36,6 +39,8 @@
 - 调用 `DataAnalysisAgent`
 - 返回包含 `sql_explanation` 的 `ChatResponse`
 - 支持传入 `session_id` 进行多轮追问
+- 支持传入 `data_source_id` 指定数据源
+- 提供 `GET /api/data-sources`、`POST /api/data-sources`、`POST /api/data-sources/{id}/test`
 - 提供 `GET /api/query-stats` 查询运营统计指标
 
 ### Agent 工作流层
@@ -58,6 +63,8 @@
 - 自动创建 SQLite 数据库
 - 初始化 `orders`、`users`、`products` 示例数据
 - 输出三张表结构、字段说明和关联关系
+- 保存 `data_sources` 数据源配置
+- 为每个数据源维护独立表白名单
 - 执行只读查询并返回字典列表
 
 ### SQL 安全层
@@ -72,8 +79,20 @@
 - 禁止注释
 - 禁止写操作和 DDL 关键字
 - 禁止 `SELECT *`
-- 只允许访问 `orders`、`users`、`products`
+- 只允许访问当前数据源配置的白名单表
 - 自动追加或收敛 `LIMIT 100`
+
+### 洞察层
+
+位置：`app/services/insights.py`
+
+职责：
+
+- 根据查询结果生成确定性 `insights`
+- 识别日期趋势最高值
+- 识别相邻日期明显下降
+- 识别品类退款率异常偏高
+- 识别 Top 1 和 Top 2 差距是否明显
 
 ### LLM 层
 
@@ -108,6 +127,8 @@ START
 - `analyze_result` 统一负责最终中文回答，错误场景返回空回答
 - `run` 结束后写入查询日志，记录问题、SQL、命中情况、图表类型、行数、错误和耗时
 - `run` 会创建或复用 `session_id`，把最近会话上下文注入 schema prompt
+- `run` 会解析 `data_source_id`，把对应数据源的表白名单用于 schema 注入、SQL 校验和 SQLite 查询执行
+- `execute_sql` 查询成功后会生成 `insights`，`analyze_result` 会把洞察短句追加进最终回答
 
 ## 5. 语义层与可信答案
 
@@ -138,6 +159,20 @@ START
 
 `orders` 保留 `product_name`、`category`、`city` 冗余字段，便于同时展示简单聚合查询和三表 JOIN 查询。
 
+新增 `data_sources` 数据源配置表：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 数据源 ID |
+| `name` | 数据源名称 |
+| `db_type` | `sqlite`、`mysql` 或 `postgresql` |
+| `database_url` | 数据库连接地址 |
+| `allowed_tables` | 允许查询的表名 JSON |
+| `is_default` | 是否默认数据源 |
+| `created_at` | 创建时间 |
+
+启动时自动初始化默认数据源 `default_sqlite`，白名单表为 `orders`、`users`、`products`。当前阶段 SQLite 会真实测试和执行；MySQL/PostgreSQL 先支持配置登记，真实连接留到下一阶段接入驱动。
+
 ## 7. 安全策略
 
 当前采用字符串预检加 SQLGlot AST 校验：
@@ -149,21 +184,31 @@ START
 - AST 根节点必须是 `SELECT`
 - 不允许 `SELECT *`
 - 只能访问白名单表
+- 白名单表来自当前数据源，而不是写死在代码中
 - 没有 `LIMIT` 时自动追加 `LIMIT 100`
 - `LIMIT` 超过 100 时收敛为 100
 - 校验失败时直接返回错误，不执行 SQL
 
 后续可以继续加入字段白名单、查询超时、成本估算和更细粒度的数据权限。
 
-## 8. 图表推荐与日志
+## 8. 图表推荐、洞察与日志
 
-接口新增 `chart` 和 `trusted_answer` 字段。
+接口新增 `chart`、`insights` 和 `trusted_answer` 字段。
 
 图表推荐规则：
 
 - 日期趋势推荐折线图
 - 排行或对比推荐柱状图
 - 无数据或字段不明确推荐表格
+
+洞察规则：
+
+- 日期字段 + 数值字段：识别最高日期
+- 相邻日期数值下降超过 30%：提示明显波动
+- `category` + `refund_rate`：识别明显高于平均水平的品类
+- 排行结果：比较 Top 1 和 Top 2 差距，超过 20% 判定明显
+
+这些洞察由规则生成，不依赖 LLM 猜测，避免编造不存在的数据。
 
 查询日志写入 SQLite `query_logs` 表，便于后续统计高频问题、失败问题和慢查询。
 
@@ -198,7 +243,9 @@ START
 - 查询日志体现可运营能力
 - 多轮追问体现 Agent 上下文理解能力
 - 查询统计接口体现运营监控和效果分析能力
+- 数据源管理和动态表白名单体现企业级数据治理能力
 - 图表推荐为后续前端可视化预留接口
+- 异常 / 趋势发现让结果解释从“总结数据”升级为“发现问题”
 - SQL 执行前有 SQLGlot AST 安全校验，体现后端风险意识
 - LLM、数据库、API、校验逻辑分层清晰，适合后续替换和扩展
 - SQLite 自动初始化，项目 clone 后可直接运行
@@ -206,7 +253,7 @@ START
 
 ## 11. 后续路线
 
-1. 扩展数据库适配层，支持 MySQL 和 PostgreSQL。
+1. 接入真实 MySQL 和 PostgreSQL 驱动，支持按 `data_source_id` 切换执行引擎。
 2. 使用 Qdrant 存储字段口径、指标定义和业务知识。
 3. 使用 Redis 缓存 schema、热门查询和会话状态。
 4. 使用 Celery 支持异步长查询和定时报表。

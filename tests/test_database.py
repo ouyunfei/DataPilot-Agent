@@ -117,3 +117,50 @@ def test_database_returns_query_stats(tmp_path):
     assert stats["failed_queries"] == 1
     assert stats["chart_type_counts"]["bar"] == 1
     assert stats["top_questions"][0]["count"] == 1
+
+
+def test_database_initializes_default_data_source(tmp_path):
+    db = SQLiteDatabase(tmp_path / "orders.db")
+    db.initialize()
+
+    source = db.get_default_data_source()
+
+    assert source["name"] == "default_sqlite"
+    assert source["db_type"] == "sqlite"
+    assert set(source["allowed_tables"]) == {"orders", "users", "products"}
+    assert source["is_default"] is True
+
+
+def test_database_creates_lists_and_tests_data_source(tmp_path):
+    database_path = tmp_path / "orders.db"
+    db = SQLiteDatabase(database_path)
+    db.initialize()
+
+    created = db.create_data_source(
+        name="orders_only",
+        db_type="sqlite",
+        database_url=str(database_path),
+        allowed_tables=["orders"],
+    )
+    sources = db.list_data_sources()
+    test_result = db.test_data_source(created["id"])
+
+    assert created["allowed_tables"] == ["orders"]
+    assert any(source["name"] == "orders_only" for source in sources)
+    assert test_result["ok"] is True
+
+
+def test_database_sqlite_source_test_fails_when_whitelist_table_missing(tmp_path):
+    db = SQLiteDatabase(tmp_path / "orders.db")
+    db.initialize()
+    source = db.create_data_source(
+        name="bad_sqlite",
+        db_type="sqlite",
+        database_url=str(tmp_path / "orders.db"),
+        allowed_tables=["missing_table"],
+    )
+
+    result = db.test_data_source(source["id"])
+
+    assert result["ok"] is False
+    assert "missing_table" in result["message"]

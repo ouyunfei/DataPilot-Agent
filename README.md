@@ -13,6 +13,8 @@
 - SQLGlot AST 安全校验
 - 强制 `LIMIT`，最大返回 100 行
 - 禁止 `SELECT *` 和非白名单表访问
+- 数据源管理：支持 SQLite / MySQL / PostgreSQL 配置登记
+- 表权限白名单：每个数据源独立配置允许查询的表
 - 语义层沉淀销售额、退款率、客单价等业务指标口径
 - 高频问题优先命中可信 SQL
 - SQLite 记录查询日志，便于后续运营和优化
@@ -22,6 +24,7 @@
 - 健康检查返回数据库和 DeepSeek 配置状态，不暴露 API key
 - 安全策略自检接口，便于展示 SQL 防护规则
 - 根据结果字段推荐图表类型
+- 异常 / 趋势发现：自动识别峰值、明显下降、退款率异常和 Top 差距
 - Docker 一键启动
 - GitHub Actions 自动运行测试
 - eval 评测集验证 Text-to-SQL 工作流质量
@@ -46,6 +49,7 @@ DataPilot-Agent/
 │   ├── services/
 │   │   ├── llm.py               # DeepSeek LLM 客户端
 │   │   ├── semantic.py          # 语义层、可信答案和图表推荐
+│   │   ├── insights.py          # 异常 / 趋势洞察规则
 │   │   └── sql_validator.py     # SQLGlot 安全校验
 │   └── main.py                  # FastAPI 应用入口
 ├── docs/
@@ -75,7 +79,7 @@ retrieve_schema -> generate_sql -> validate_sql -> execute_sql -> analyze_result
 - `generate_sql`：调用 DeepSeek，根据用户问题和 schema 生成 SQL 与 SQL 解释
 - `validate_sql`：使用 SQLGlot 校验 SQL 安全性，并强制 `LIMIT`
 - `execute_sql`：执行已校验 SQL 并返回查询结果
-- `analyze_result`：调用 DeepSeek，基于查询结果生成中文业务分析结论
+- `analyze_result`：调用 DeepSeek，基于查询结果和规则洞察生成中文业务分析结论
 
 如果 `validate_sql` 发现危险 SQL，工作流会直接跳过 `execute_sql`，返回错误信息。
 
@@ -194,6 +198,7 @@ curl -X POST "http://127.0.0.1:8000/api/chat" ^
 {
   "question": "最近 30 天销售额最高的 5 个商品是什么？",
   "session_id": "0b6f6a50-6f8d-4b2f-a1af-b1f8db663ab4",
+  "data_source_id": 1,
   "sql": "SELECT product_name, ROUND(SUM(amount), 2) AS total_amount, COUNT(*) AS order_count FROM orders WHERE status = 'paid' GROUP BY product_name ORDER BY total_amount DESC LIMIT 5",
   "sql_explanation": "按商品名称分组，统计已支付订单销售额，并按销售额倒序取前 5 名。",
   "data": [
@@ -209,9 +214,24 @@ curl -X POST "http://127.0.0.1:8000/api/chat" ^
     "y": "total_amount",
     "reason": "排行或对比数据适合柱状图。"
   },
+  "insights": [
+    {
+      "type": "gap",
+      "message": "Top 1 人体工学椅 比 Top 2 咖啡机 高 28.0%，头部差距明显。"
+    }
+  ],
   "trusted_answer": true,
-  "answer": "最近 30 天销售额最高的 Top 5 商品分别是人体工学椅、咖啡机、冲锋衣、空气炸锅和智能电饭煲，其中人体工学椅排名第一。",
+  "answer": "最近 30 天销售额最高的 Top 5 商品分别是人体工学椅、咖啡机、冲锋衣、空气炸锅和智能电饭煲，其中人体工学椅排名第一。Top 1 人体工学椅 比 Top 2 咖啡机 高 28.0%，头部差距明显。",
   "error": null
+}
+```
+
+指定数据源时，在请求中加入 `data_source_id`；不传则使用默认 SQLite 示例数据源：
+
+```json
+{
+  "question": "最近 30 天销售额最高的 5 个商品是什么？",
+  "data_source_id": 1
 }
 ```
 
@@ -278,6 +298,28 @@ curl "http://127.0.0.1:8000/api/security/policies"
 
 返回当前 SQL 安全策略，例如只允许 `SELECT`、禁止多语句、禁止 `SELECT *`、白名单表和最大 `LIMIT`。
 
+### 数据源管理
+
+```bash
+curl "http://127.0.0.1:8000/api/data-sources"
+```
+
+创建数据源：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/data-sources" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"name\":\"orders_only\",\"db_type\":\"sqlite\",\"database_url\":\"data/datapilot.db\",\"allowed_tables\":[\"orders\"]}"
+```
+
+测试数据源：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/data-sources/1/test"
+```
+
+当前阶段 SQLite 数据源会真实检查数据库文件和白名单表；MySQL/PostgreSQL 先支持配置登记，真实连接执行留到下一阶段接入驱动。
+
 ## SQL 安全策略
 
 SQL 执行前必须通过 `validate_sql`：
@@ -286,12 +328,12 @@ SQL 执行前必须通过 `validate_sql`：
 - 禁止 `INSERT`、`UPDATE`、`DELETE`、`DROP`、`ALTER`、`TRUNCATE`
 - 禁止注释和多语句
 - 禁止 `SELECT *`
-- 只允许访问白名单表：`orders`、`users`、`products`
+- 只允许访问当前数据源配置的白名单表
 - 没有 `LIMIT` 时自动追加 `LIMIT 100`
 - `LIMIT` 超过 100 时自动收敛为 `LIMIT 100`
 - 使用 SQLGlot 做 AST 级别校验
 
-## 语义层、可信答案、查询日志和图表推荐
+## 语义层、可信答案、查询日志、图表推荐和洞察
 
 新增能力沉淀在：
 
@@ -299,7 +341,14 @@ SQL 执行前必须通过 `validate_sql`：
 docs/semantic-trusted-logging-chart-design.md
 ```
 
-后端会把业务指标口径注入给 DeepSeek；常见问题命中可信 SQL；每次查询写入 `query_logs`；接口返回 `chart` 字段给未来前端使用。
+后端会把业务指标口径注入给 DeepSeek；常见问题命中可信 SQL；每次查询写入 `query_logs`；接口返回 `chart` 字段给未来前端使用。数据源白名单会同时作用于 schema 注入和 SQL 安全校验。
+
+`insights` 字段使用确定性规则生成，不让 LLM 编造异常结论。当前支持：
+
+- 日期趋势中的最高值
+- 相邻日期下降超过 30% 的明显波动
+- 品类退款率明显高于平均水平
+- Top 1 和 Top 2 差距是否明显
 
 ## 运行测试
 
@@ -373,7 +422,7 @@ Content-Type: application/json
 }
 ```
 
-讲解链路：LangGraph 获取 schema 和语义层，优先命中可信 SQL，经过 SQLGlot 安全校验后执行 SQLite 查询，再生成中文 Top 5 总结和图表推荐。
+讲解链路：LangGraph 获取 schema 和语义层，优先命中可信 SQL，经过 SQLGlot 安全校验后执行 SQLite 查询，再生成中文 Top 5 总结、规则洞察和图表推荐。
 
 4. 演示危险 SQL 拦截：
 
@@ -390,11 +439,12 @@ Content-Type: application/json
 ```text
 GET http://127.0.0.1:8000/api/query-logs
 GET http://127.0.0.1:8000/api/query-stats
+GET http://127.0.0.1:8000/api/data-sources
 POST http://127.0.0.1:8000/api/query-logs/{id}/feedback
 GET http://127.0.0.1:8000/api/security/policies
 ```
 
-讲解查询日志和统计接口用于观察高频问题、失败问题、慢查询和图表使用分布，用户反馈用于沉淀可信答案和优化语义层。
+讲解查询日志和统计接口用于观察高频问题、失败问题、慢查询和图表使用分布，数据源白名单用于限制可查询表，用户反馈用于沉淀可信答案和优化语义层。
 
 6. 演示工程化能力：
 
@@ -408,7 +458,7 @@ python scripts/run_evals.py
 
 ## 后续扩展方向
 
-- 支持多数据库：将 `SQLiteDatabase` 抽象为通用数据库接口，扩展 MySQL/PostgreSQL
+- 接入真实 MySQL/PostgreSQL 驱动，让已登记的数据源可以真实执行查询
 - 加入 Qdrant：存储业务指标解释、字段口径和历史查询样例，增强 schema 理解
 - 加入 Redis：缓存 schema、热门查询结果和会话上下文
 - 加入 Celery：处理耗时查询、异步报表和定时分析任务
