@@ -4,6 +4,8 @@ import random
 import sqlite3
 import uuid
 import json
+import re
+import time
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
@@ -39,6 +41,59 @@ PRODUCT_FIELD_DESCRIPTIONS = {
     "cost_price": "成本价，单位：元",
     "list_price": "标价，单位：元",
 }
+TABLE_DESCRIPTIONS = {
+    "orders": ("订单事实表", ORDER_FIELD_DESCRIPTIONS),
+    "users": ("用户维度表", USER_FIELD_DESCRIPTIONS),
+    "products": ("商品维度表", PRODUCT_FIELD_DESCRIPTIONS),
+}
+
+DEFAULT_METRICS = [
+    {
+        "metric_key": "sales_amount",
+        "name": "销售额",
+        "expression": "SUM(orders.amount)",
+        "description": "已支付订单金额总和。",
+    },
+    {
+        "metric_key": "refund_rate",
+        "name": "退款率",
+        "expression": "退款订单数 / 总订单数",
+        "description": "refund_amount > 0 或 status = 'refunded' 的订单占比。",
+    },
+    {
+        "metric_key": "average_order_value",
+        "name": "客单价",
+        "expression": "SUM(orders.amount) / COUNT(DISTINCT orders.id)",
+        "description": "平均每笔订单金额。",
+    },
+    {
+        "metric_key": "gross_profit",
+        "name": "毛利",
+        "expression": "SUM(orders.amount - products.cost_price)",
+        "description": "订单金额减商品成本价后的金额。",
+    },
+    {
+        "metric_key": "order_count",
+        "name": "订单数",
+        "expression": "COUNT(orders.id)",
+        "description": "订单明细数量。",
+    },
+]
+FORBIDDEN_METRIC_EXPRESSION_KEYWORDS = {
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "DROP",
+    "ALTER",
+    "TRUNCATE",
+    "CREATE",
+    "REPLACE",
+    "ATTACH",
+    "DETACH",
+    "PRAGMA",
+    "VACUUM",
+    "REINDEX",
+}
 
 
 class SQLiteDatabase:
@@ -54,14 +109,17 @@ class SQLiteDatabase:
             self._create_tables(conn)
             self._seed_if_empty(conn)
             self._seed_default_data_source(conn)
+            self._seed_default_metrics(conn)
 
-    def get_schema_description(self, allowed_tables: list[str] | None = None) -> str:
-        table_descriptions = {
-            "orders": ("订单事实表", ORDER_FIELD_DESCRIPTIONS),
-            "users": ("用户维度表", USER_FIELD_DESCRIPTIONS),
-            "products": ("商品维度表", PRODUCT_FIELD_DESCRIPTIONS),
+    def get_schema_description(
+        self,
+        allowed_tables: list[str] | None = None,
+        allowed_columns: dict[str, list[str]] | None = None,
+    ) -> str:
+        selected_tables = set(allowed_tables or TABLE_DESCRIPTIONS.keys())
+        selected_columns = {
+            table: set(columns) for table, columns in (allowed_columns or {}).items()
         }
-        selected_tables = set(allowed_tables or table_descriptions.keys())
         lines = [f"当前允许查询的业务表：{'、'.join(sorted(selected_tables))}。"]
         if {"orders", "users"} <= selected_tables:
             lines.append("表关系：orders.user_id = users.id。")
@@ -69,7 +127,7 @@ class SQLiteDatabase:
             lines.append("表关系：orders.product_id = products.id。")
 
         with self._connect() as conn:
-            for table_name, (table_comment, field_descriptions) in table_descriptions.items():
+            for table_name, (table_comment, field_descriptions) in TABLE_DESCRIPTIONS.items():
                 if table_name not in selected_tables:
                     continue
                 columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
@@ -78,6 +136,8 @@ class SQLiteDatabase:
                 lines.append("字段：")
                 for column in columns:
                     name = column["name"]
+                    if selected_columns and name not in selected_columns.get(table_name, set()):
+                        continue
                     column_type = column["type"]
                     description = field_descriptions.get(name, "")
                     if name == "user_id" and "users" not in selected_tables:
@@ -95,10 +155,30 @@ class SQLiteDatabase:
             ).fetchall()
             return [row["name"] for row in rows]
 
-    def execute_select(self, sql: str, database_url: str | None = None) -> list[dict[str, Any]]:
+    def execute_select(
+        self,
+        sql: str,
+        database_url: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
         with self._connect(database_url) as conn:
-            cursor = conn.execute(sql)
-            return [dict(row) for row in cursor.fetchall()]
+            if timeout_seconds is not None:
+                deadline = time.monotonic() + timeout_seconds
+
+                def interrupt_when_timeout() -> int:
+                    return int(time.monotonic() >= deadline)
+
+                conn.set_progress_handler(interrupt_when_timeout, 1000)
+            try:
+                cursor = conn.execute(sql)
+                return [dict(row) for row in cursor.fetchall()]
+            except sqlite3.OperationalError as exc:
+                if timeout_seconds is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("SQL 执行超时") from exc
+                raise
+            finally:
+                if timeout_seconds is not None:
+                    conn.set_progress_handler(None, 0)
 
     @contextmanager
     def _connect(self, path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
@@ -199,6 +279,8 @@ class SQLiteDatabase:
             conn.execute("ALTER TABLE query_logs ADD COLUMN feedback TEXT")
         if "feedback_note" not in existing_columns:
             conn.execute("ALTER TABLE query_logs ADD COLUMN feedback_note TEXT")
+        if "error_code" not in existing_columns:
+            conn.execute("ALTER TABLE query_logs ADD COLUMN error_code TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -229,8 +311,28 @@ class SQLiteDatabase:
                 db_type TEXT NOT NULL,
                 database_url TEXT NOT NULL,
                 allowed_tables TEXT NOT NULL,
+                allowed_columns TEXT,
                 is_default INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        data_source_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(data_sources)").fetchall()
+        }
+        if "allowed_columns" not in data_source_columns:
+            conn.execute("ALTER TABLE data_sources ADD COLUMN allowed_columns TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                metric_key TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                expression TEXT NOT NULL,
+                description TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -253,12 +355,182 @@ class SQLiteDatabase:
             ),
         )
 
+    @staticmethod
+    def _seed_default_metrics(conn: sqlite3.Connection) -> None:
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO metrics (metric_key, name, expression, description, enabled)
+            VALUES (?, ?, ?, ?, 1)
+            """,
+            [
+                (
+                    metric["metric_key"],
+                    metric["name"],
+                    metric["expression"],
+                    metric["description"],
+                )
+                for metric in DEFAULT_METRICS
+            ],
+        )
+
+    def list_metrics(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        where = "WHERE enabled = 1" if enabled_only else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    id, metric_key, name, expression, description,
+                    enabled, created_at, updated_at
+                FROM metrics
+                {where}
+                ORDER BY id ASC
+                """
+            ).fetchall()
+            return [self._metric_from_row(row) for row in rows]
+
+    def get_metric(self, metric_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    id, metric_key, name, expression, description,
+                    enabled, created_at, updated_at
+                FROM metrics
+                WHERE id = ?
+                """,
+                (metric_id,),
+            ).fetchone()
+            return self._metric_from_row(row) if row else None
+
+    def create_metric(
+        self,
+        metric_key: str,
+        name: str,
+        expression: str,
+        description: str,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        metric_key = metric_key.strip().lower()
+        name = name.strip()
+        expression = expression.strip()
+        description = description.strip()
+        self._validate_metric(metric_key, name, expression, description)
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO metrics (metric_key, name, expression, description, enabled)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (metric_key, name, expression, description, int(enabled)),
+            )
+            metric_id = cursor.lastrowid
+
+        metric = self.get_metric(metric_id)
+        if metric is None:
+            raise ValueError("指标创建失败")
+        return metric
+
+    def update_metric(
+        self,
+        metric_id: int,
+        metric_key: str | None = None,
+        name: str | None = None,
+        expression: str | None = None,
+        description: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any] | None:
+        current = self.get_metric(metric_id)
+        if current is None:
+            return None
+
+        next_metric = {
+            "metric_key": (metric_key.strip().lower() if metric_key is not None else current["metric_key"]),
+            "name": (name.strip() if name is not None else current["name"]),
+            "expression": (expression.strip() if expression is not None else current["expression"]),
+            "description": (
+                description.strip() if description is not None else current["description"]
+            ),
+            "enabled": current["enabled"] if enabled is None else enabled,
+        }
+        self._validate_metric(
+            next_metric["metric_key"],
+            next_metric["name"],
+            next_metric["expression"],
+            next_metric["description"],
+        )
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE metrics
+                SET
+                    metric_key = ?,
+                    name = ?,
+                    expression = ?,
+                    description = ?,
+                    enabled = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    next_metric["metric_key"],
+                    next_metric["name"],
+                    next_metric["expression"],
+                    next_metric["description"],
+                    int(next_metric["enabled"]),
+                    metric_id,
+                ),
+            )
+        return self.get_metric(metric_id)
+
+    def delete_metric(self, metric_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM metrics WHERE id = ?", (metric_id,))
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def _validate_metric(
+        metric_key: str,
+        name: str,
+        expression: str,
+        description: str,
+    ) -> None:
+        if not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", metric_key):
+            raise ValueError("metric_key 必须为小写字母、数字或下划线，且以字母开头")
+        if not name:
+            raise ValueError("name 不能为空")
+        if not expression:
+            raise ValueError("expression 不能为空")
+        if not description:
+            raise ValueError("description 不能为空")
+        upper_expression = expression.upper()
+        if ";" in expression or "--" in expression or "/*" in expression or "*/" in expression:
+            raise ValueError("expression 不允许包含注释或分号")
+        for keyword in FORBIDDEN_METRIC_EXPRESSION_KEYWORDS:
+            if re.search(rf"\b{keyword}\b", upper_expression):
+                raise ValueError(f"expression 不允许包含 {keyword}")
+
+    @staticmethod
+    def _metric_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "metric_key": row["metric_key"],
+            "name": row["name"],
+            "expression": row["expression"],
+            "description": row["description"],
+            "enabled": bool(row["enabled"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
     def create_data_source(
         self,
         name: str,
         db_type: str,
         database_url: str,
         allowed_tables: list[str],
+        allowed_columns: dict[str, list[str]] | None = None,
         is_default: bool = False,
     ) -> dict[str, Any]:
         db_type = db_type.lower()
@@ -268,16 +540,26 @@ class SQLiteDatabase:
         tables = [table.strip().lower() for table in allowed_tables if table.strip()]
         if not tables:
             raise ValueError("allowed_tables 不能为空")
+        columns = self._normalize_allowed_columns(tables, allowed_columns)
 
         with self._connect() as conn:
             if is_default:
                 conn.execute("UPDATE data_sources SET is_default = 0")
             cursor = conn.execute(
                 """
-                INSERT INTO data_sources (name, db_type, database_url, allowed_tables, is_default)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO data_sources (
+                    name, db_type, database_url, allowed_tables, allowed_columns, is_default
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (name, db_type, database_url, json.dumps(tables, ensure_ascii=False), int(is_default)),
+                (
+                    name,
+                    db_type,
+                    database_url,
+                    json.dumps(tables, ensure_ascii=False),
+                    json.dumps(columns, ensure_ascii=False),
+                    int(is_default),
+                ),
             )
             source_id = cursor.lastrowid
 
@@ -290,7 +572,9 @@ class SQLiteDatabase:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, name, db_type, database_url, allowed_tables, is_default, created_at
+                SELECT
+                    id, name, db_type, database_url, allowed_tables,
+                    allowed_columns, is_default, created_at
                 FROM data_sources
                 ORDER BY is_default DESC, id ASC
                 """
@@ -301,7 +585,9 @@ class SQLiteDatabase:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, name, db_type, database_url, allowed_tables, is_default, created_at
+                SELECT
+                    id, name, db_type, database_url, allowed_tables,
+                    allowed_columns, is_default, created_at
                 FROM data_sources
                 WHERE id = ?
                 """,
@@ -313,7 +599,9 @@ class SQLiteDatabase:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, name, db_type, database_url, allowed_tables, is_default, created_at
+                SELECT
+                    id, name, db_type, database_url, allowed_tables,
+                    allowed_columns, is_default, created_at
                 FROM data_sources
                 WHERE is_default = 1
                 ORDER BY id ASC
@@ -348,17 +636,102 @@ class SQLiteDatabase:
             return {"ok": False, "message": f"白名单表不存在：{'、'.join(sorted(missing))}"}
         return {"ok": True, "message": "SQLite 数据源连接正常"}
 
+    def list_catalog_tables(self, data_source_id: int | None = None) -> list[dict[str, Any]]:
+        source = (
+            self.get_data_source(data_source_id)
+            if data_source_id is not None
+            else self.get_default_data_source()
+        )
+        allowed_tables = set(source["allowed_tables"])
+        return [
+            {
+                "name": table,
+                "description": description,
+                "queryable": table in allowed_tables,
+            }
+            for table, (description, _) in TABLE_DESCRIPTIONS.items()
+            if table in allowed_tables
+        ]
+
+    def list_catalog_columns(
+        self,
+        table_name: str,
+        data_source_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        table_name = table_name.lower()
+        if table_name not in TABLE_DESCRIPTIONS:
+            return []
+
+        source = (
+            self.get_data_source(data_source_id)
+            if data_source_id is not None
+            else self.get_default_data_source()
+        )
+        allowed = set(source["allowed_columns"].get(table_name, []))
+        _, field_descriptions = TABLE_DESCRIPTIONS[table_name]
+
+        with self._connect(source["database_url"]) as conn:
+            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+
+        return [
+            {
+                "name": row["name"],
+                "type": row["type"],
+                "description": field_descriptions.get(row["name"], ""),
+                "queryable": row["name"] in allowed,
+            }
+            for row in rows
+        ]
+
     @staticmethod
     def _data_source_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        allowed_tables = json.loads(row["allowed_tables"])
+        allowed_columns_raw = row["allowed_columns"]
+        allowed_columns = (
+            json.loads(allowed_columns_raw)
+            if allowed_columns_raw
+            else SQLiteDatabase._default_allowed_columns(allowed_tables)
+        )
         return {
             "id": row["id"],
             "name": row["name"],
             "db_type": row["db_type"],
             "database_url": row["database_url"],
-            "allowed_tables": json.loads(row["allowed_tables"]),
+            "allowed_tables": allowed_tables,
+            "allowed_columns": allowed_columns,
             "is_default": bool(row["is_default"]),
             "created_at": row["created_at"],
         }
+
+    @staticmethod
+    def _default_allowed_columns(allowed_tables: list[str]) -> dict[str, list[str]]:
+        return {
+            table: list(TABLE_DESCRIPTIONS[table][1].keys())
+            for table in allowed_tables
+            if table in TABLE_DESCRIPTIONS
+        }
+
+    @staticmethod
+    def _normalize_allowed_columns(
+        allowed_tables: list[str],
+        allowed_columns: dict[str, list[str]] | None,
+    ) -> dict[str, list[str]]:
+        defaults = SQLiteDatabase._default_allowed_columns(allowed_tables)
+        if not allowed_columns:
+            return defaults
+
+        normalized: dict[str, list[str]] = {}
+        for table in allowed_tables:
+            if table not in TABLE_DESCRIPTIONS:
+                normalized[table] = allowed_columns.get(table, [])
+                continue
+            requested = [
+                column.strip().lower()
+                for column in allowed_columns.get(table, [])
+                if column.strip()
+            ]
+            normalized[table] = requested or defaults.get(table, [])
+        return normalized
 
     def log_query(
         self,
@@ -369,16 +742,27 @@ class SQLiteDatabase:
         row_count: int,
         error: str | None,
         duration_ms: int,
+        error_code: str | None = None,
     ) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO query_logs (
-                    question, sql, trusted_answer, chart_type, row_count, error, duration_ms
+                    question, sql, trusted_answer, chart_type, row_count,
+                    error, error_code, duration_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (question, sql, int(trusted_answer), chart_type, row_count, error, duration_ms),
+                (
+                    question,
+                    sql,
+                    int(trusted_answer),
+                    chart_type,
+                    row_count,
+                    error,
+                    error_code,
+                    duration_ms,
+                ),
             )
 
     def list_query_logs(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -388,7 +772,7 @@ class SQLiteDatabase:
                 """
                 SELECT
                     id, question, sql, trusted_answer, chart_type, row_count,
-                    error, feedback, feedback_note, duration_ms, created_at
+                    error, error_code, feedback, feedback_note, duration_ms, created_at
                 FROM query_logs
                 ORDER BY id DESC
                 LIMIT ?
@@ -510,6 +894,15 @@ class SQLiteDatabase:
                 LIMIT 5
                 """
             ).fetchall()
+            error_code_rows = conn.execute(
+                """
+                SELECT error_code, COUNT(*) AS count
+                FROM query_logs
+                WHERE error_code IS NOT NULL
+                GROUP BY error_code
+                ORDER BY count DESC
+                """
+            ).fetchall()
 
         return {
             "total_queries": summary["total_queries"] or 0,
@@ -519,6 +912,7 @@ class SQLiteDatabase:
             "average_duration_ms": summary["average_duration_ms"] or 0,
             "chart_type_counts": {row["chart_type"]: row["count"] for row in chart_rows},
             "feedback_counts": {row["feedback"]: row["count"] for row in feedback_rows},
+            "error_code_counts": {row["error_code"]: row["count"] for row in error_code_rows},
             "top_questions": [dict(row) for row in question_rows],
         }
 

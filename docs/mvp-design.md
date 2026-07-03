@@ -15,8 +15,10 @@
 - SQLGlot AST 安全校验
 - 数据源配置管理
 - 数据源级表权限白名单
+- 数据源级字段权限白名单
+- 数据目录接口
 - SQLite 查询执行
-- 语义层业务指标口径
+- 指标管理和语义层业务口径配置
 - 可信 SQL 命中
 - 查询日志
 - 多轮追问会话上下文
@@ -41,6 +43,8 @@
 - 支持传入 `session_id` 进行多轮追问
 - 支持传入 `data_source_id` 指定数据源
 - 提供 `GET /api/data-sources`、`POST /api/data-sources`、`POST /api/data-sources/{id}/test`
+- 提供 `GET /api/catalog/tables`、`GET /api/catalog/tables/{table_name}/columns`
+- 提供 `GET /api/metrics`、`POST /api/metrics`、`PUT /api/metrics/{id}`、`DELETE /api/metrics/{id}`
 - 提供 `GET /api/query-stats` 查询运营统计指标
 
 ### Agent 工作流层
@@ -65,6 +69,9 @@
 - 输出三张表结构、字段说明和关联关系
 - 保存 `data_sources` 数据源配置
 - 为每个数据源维护独立表白名单
+- 为每个数据源维护独立字段白名单
+- 提供数据目录元数据：表名、字段名、字段类型、字段说明和可查询状态
+- 保存 `metrics` 指标配置
 - 执行只读查询并返回字典列表
 
 ### SQL 安全层
@@ -80,7 +87,9 @@
 - 禁止写操作和 DDL 关键字
 - 禁止 `SELECT *`
 - 只允许访问当前数据源配置的白名单表
+- 只允许访问当前数据源配置的白名单字段
 - 自动追加或收敛 `LIMIT 100`
+- SQLite 查询执行超时保护，默认 `QUERY_TIMEOUT_SECONDS=5`
 
 ### 洞察层
 
@@ -134,7 +143,7 @@ START
 
 位置：`app/services/semantic.py`
 
-当前语义层包含：
+当前语义层指标存储在 SQLite `metrics` 表中，默认包含：
 
 - 销售额
 - 退款率
@@ -168,10 +177,24 @@ START
 | `db_type` | `sqlite`、`mysql` 或 `postgresql` |
 | `database_url` | 数据库连接地址 |
 | `allowed_tables` | 允许查询的表名 JSON |
+| `allowed_columns` | 允许查询的字段名 JSON |
 | `is_default` | 是否默认数据源 |
 | `created_at` | 创建时间 |
 
 启动时自动初始化默认数据源 `default_sqlite`，白名单表为 `orders`、`users`、`products`。当前阶段 SQLite 会真实测试和执行；MySQL/PostgreSQL 先支持配置登记，真实连接留到下一阶段接入驱动。
+
+新增 `metrics` 指标配置表：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 指标 ID |
+| `metric_key` | 指标唯一标识 |
+| `name` | 指标中文名 |
+| `expression` | 指标计算口径 |
+| `description` | 业务说明 |
+| `enabled` | 是否启用 |
+| `created_at` | 创建时间 |
+| `updated_at` | 更新时间 |
 
 ## 7. 安全策略
 
@@ -185,11 +208,14 @@ START
 - 不允许 `SELECT *`
 - 只能访问白名单表
 - 白名单表来自当前数据源，而不是写死在代码中
+- 只能访问白名单字段
+- 字段白名单来自当前数据源，schema 注入和 SQL 校验共用同一份配置
 - 没有 `LIMIT` 时自动追加 `LIMIT 100`
 - `LIMIT` 超过 100 时收敛为 100
+- SQLite 执行阶段有超时保护
 - 校验失败时直接返回错误，不执行 SQL
 
-后续可以继续加入字段白名单、查询超时、成本估算和更细粒度的数据权限。
+后续可以继续加入成本估算、行级权限和更细粒度的数据权限。
 
 ## 8. 图表推荐、洞察与日志
 
@@ -211,6 +237,8 @@ START
 这些洞察由规则生成，不依赖 LLM 猜测，避免编造不存在的数据。
 
 查询日志写入 SQLite `query_logs` 表，便于后续统计高频问题、失败问题和慢查询。
+
+错误会记录 `error_code`，包括 `llm_error`、`sql_safety_error`、`execution_error`、`data_source_error` 和 `query_timeout`。
 
 多轮追问使用 `chat_sessions` 和 `chat_messages` 表保存最近问答。用户第一次请求不需要传 `session_id`，后端会自动生成；后续追问带上同一个 `session_id`，Agent 会把最近 3 条上下文交给 SQL 生成节点。
 
@@ -239,11 +267,13 @@ START
 - 不是普通 ChatBot，而是可解释的数据分析 Agent 工作流
 - LangGraph 明确拆分 Agent 节点，便于展示状态流转和扩展能力
 - DeepSeek 负责生成 SQL、解释 SQL 和总结结果
-- 可信 SQL 和语义层降低大模型随机性
+- 可信 SQL 和可配置语义层降低大模型随机性
 - 查询日志体现可运营能力
 - 多轮追问体现 Agent 上下文理解能力
 - 查询统计接口体现运营监控和效果分析能力
 - 数据源管理和动态表白名单体现企业级数据治理能力
+- 数据目录、字段白名单和查询保护体现企业级安全治理能力
+- 指标管理体现企业指标口径治理能力
 - 图表推荐为后续前端可视化预留接口
 - 异常 / 趋势发现让结果解释从“总结数据”升级为“发现问题”
 - SQL 执行前有 SQLGlot AST 安全校验，体现后端风险意识

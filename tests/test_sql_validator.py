@@ -67,3 +67,21 @@ def test_validate_select_sql_uses_dynamic_allowed_tables():
 
     with pytest.raises(SQLSafetyError):
         validate_select_sql("SELECT id FROM orders LIMIT 5", allowed_tables=set())
+
+
+def test_validate_select_sql_uses_dynamic_allowed_columns():
+    validated = validate_select_sql(
+        "SELECT p.product_name FROM products p LIMIT 5",
+        allowed_tables={"products"},
+        allowed_columns={"products": {"id", "product_name"}},
+    )
+    assert "product_name" in validated
+
+    with pytest.raises(SQLSafetyError) as exc:
+        validate_select_sql(
+            "SELECT p.cost_price FROM products p LIMIT 5",
+            allowed_tables={"products"},
+            allowed_columns={"products": {"id", "product_name"}},
+        )
+
+    assert "cost_price" in str(exc.value)

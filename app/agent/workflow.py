@@ -6,6 +6,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from app.core.config import QUERY_TIMEOUT_SECONDS
 from app.db.database import SQLiteDatabase
 from app.services.insights import recommend_insights
 from app.services.llm import BaseLLMClient
@@ -29,6 +30,7 @@ class AnalysisState(TypedDict, total=False):
     trusted_answer: bool
     answer: str
     error: str | None
+    error_code: str | None
 
 
 class DataAnalysisAgent:
@@ -65,8 +67,9 @@ class DataAnalysisAgent:
                 "trusted_answer": False,
                 "answer": "",
                 "error": "数据源不存在",
+                "error_code": "data_source_error",
             }
-            self.db.log_query(question, "", False, "", 0, result["error"], 0)
+            self.db.log_query(question, "", False, "", 0, result["error"], 0, result["error_code"])
             self.db.save_chat_message(session_id, question, "", "")
             return result
 
@@ -88,6 +91,7 @@ class DataAnalysisAgent:
                 "trusted_answer": False,
                 "answer": "",
                 "error": None,
+                "error_code": None,
             }
         )
         result["data_source_id"] = data_source["id"]
@@ -100,6 +104,7 @@ class DataAnalysisAgent:
             row_count=len(result.get("data", [])),
             error=result.get("error"),
             duration_ms=duration_ms,
+            error_code=result.get("error_code"),
         )
         self.db.save_chat_message(
             session_id=session_id,
@@ -137,8 +142,8 @@ class DataAnalysisAgent:
 
     def _retrieve_schema(self, state: AnalysisState) -> dict[str, str]:
         schema = (
-            f"{self.db.get_schema_description(state['data_source']['allowed_tables'])}"
-            f"\n\n{build_semantic_context(state['data_source']['allowed_tables'])}"
+            f"{self.db.get_schema_description(state['data_source']['allowed_tables'], state['data_source']['allowed_columns'])}"
+            f"\n\n{build_semantic_context(self.db.list_metrics(enabled_only=True), state['data_source']['allowed_tables'], state['data_source']['allowed_columns'])}"
         )
         if state.get("session_context"):
             schema = f"{schema}\n\n{state['session_context']}"
@@ -159,7 +164,12 @@ class DataAnalysisAgent:
                 schema=state["schema"],
             )
         except Exception as exc:
-            return {"error": f"LLM 调用失败：{exc}", "sql": "", "sql_explanation": ""}
+            return {
+                "error": f"LLM 调用失败：{exc}",
+                "error_code": "llm_error",
+                "sql": "",
+                "sql_explanation": "",
+            }
 
         return {
             "sql": generation.sql.strip(),
@@ -175,29 +185,46 @@ class DataAnalysisAgent:
             validated_sql = validate_select_sql(
                 state["sql"],
                 allowed_tables=set(state["data_source"]["allowed_tables"]),
+                allowed_columns={
+                    table: set(columns)
+                    for table, columns in state["data_source"]["allowed_columns"].items()
+                },
             )
         except SQLSafetyError as exc:
-            return {"error": str(exc), "validated_sql": ""}
+            return {"error": str(exc), "error_code": "sql_safety_error", "validated_sql": ""}
 
-        return {"sql": validated_sql, "validated_sql": validated_sql, "error": None}
+        return {
+            "sql": validated_sql,
+            "validated_sql": validated_sql,
+            "error": None,
+            "error_code": None,
+        }
 
     def _execute_sql(self, state: AnalysisState) -> dict[str, list[dict[str, Any]] | str | None]:
         if state["data_source"]["db_type"] != "sqlite":
-            return {"data": [], "error": "当前阶段仅支持 SQLite 数据源执行查询"}
+            return {
+                "data": [],
+                "error": "当前阶段仅支持 SQLite 数据源执行查询",
+                "error_code": "data_source_error",
+            }
 
         try:
             rows = self.db.execute_select(
                 state["validated_sql"],
                 database_url=state["data_source"]["database_url"],
+                timeout_seconds=QUERY_TIMEOUT_SECONDS,
             )
+        except TimeoutError as exc:
+            return {"data": [], "error": str(exc), "error_code": "query_timeout"}
         except Exception as exc:
-            return {"data": [], "error": f"SQL 执行失败：{exc}"}
+            return {"data": [], "error": f"SQL 执行失败：{exc}", "error_code": "execution_error"}
 
         return {
             "data": rows,
             "chart": recommend_chart(rows),
             "insights": recommend_insights(rows),
             "error": None,
+            "error_code": None,
         }
 
     def _analyze_result(self, state: AnalysisState) -> dict[str, str]:
@@ -212,7 +239,7 @@ class DataAnalysisAgent:
                 rows=state.get("data", []),
             )
         except Exception as exc:
-            return {"answer": "", "error": f"LLM 调用失败：{exc}"}
+            return {"answer": "", "error": f"LLM 调用失败：{exc}", "error_code": "llm_error"}
 
         insight_messages = [item["message"] for item in state.get("insights", [])]
         if insight_messages:

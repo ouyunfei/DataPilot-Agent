@@ -15,7 +15,11 @@
 - 禁止 `SELECT *` 和非白名单表访问
 - 数据源管理：支持 SQLite / MySQL / PostgreSQL 配置登记
 - 表权限白名单：每个数据源独立配置允许查询的表
-- 语义层沉淀销售额、退款率、客单价等业务指标口径
+- 字段级权限白名单：每个数据源独立配置允许查询的字段
+- 数据目录接口：查看可查询表、字段、字段类型和字段说明
+- 查询保护增强：SQL 执行超时、错误分类和日志记录
+- 指标管理：用 SQLite 配置销售额、退款率、客单价、毛利、订单数等业务口径
+- 语义层把启用指标动态注入给 Agent
 - 高频问题优先命中可信 SQL
 - SQLite 记录查询日志，便于后续运营和优化
 - 查询日志列表和用户反馈接口
@@ -48,7 +52,7 @@ DataPilot-Agent/
 │   │   └── chat.py              # Pydantic 请求/响应模型
 │   ├── services/
 │   │   ├── llm.py               # DeepSeek LLM 客户端
-│   │   ├── semantic.py          # 语义层、可信答案和图表推荐
+│   │   ├── semantic.py          # 语义层上下文、可信答案和图表推荐
 │   │   ├── insights.py          # 异常 / 趋势洞察规则
 │   │   └── sql_validator.py     # SQLGlot 安全校验
 │   └── main.py                  # FastAPI 应用入口
@@ -75,7 +79,7 @@ retrieve_schema -> generate_sql -> validate_sql -> execute_sql -> analyze_result
 
 节点职责：
 
-- `retrieve_schema`：读取三张表结构、字段说明和表关系
+- `retrieve_schema`：读取三张表结构、字段说明、表关系和启用指标口径
 - `generate_sql`：调用 DeepSeek，根据用户问题和 schema 生成 SQL 与 SQL 解释
 - `validate_sql`：使用 SQLGlot 校验 SQL 安全性，并强制 `LIMIT`
 - `execute_sql`：执行已校验 SQL 并返回查询结果
@@ -123,6 +127,16 @@ retrieve_schema -> generate_sql -> validate_sql -> execute_sql -> analyze_result
 | `created_at` | 下单时间 |
 | `refund_amount` | 退款金额 |
 
+`metrics` 指标配置表默认初始化销售额、退款率、客单价、毛利和订单数。启用状态的指标会被注入 Agent 的语义层：
+
+| 字段 | 说明 |
+| --- | --- |
+| `metric_key` | 指标唯一标识 |
+| `name` | 指标中文名 |
+| `expression` | 指标计算口径 |
+| `description` | 业务说明 |
+| `enabled` | 是否启用 |
+
 ## 本地启动
 
 建议使用虚拟环境：
@@ -146,6 +160,7 @@ DEEPSEEK_API_KEY=your_deepseek_api_key
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_TIMEOUT_SECONDS=30
+QUERY_TIMEOUT_SECONDS=5
 ```
 
 启动服务：
@@ -222,7 +237,8 @@ curl -X POST "http://127.0.0.1:8000/api/chat" ^
   ],
   "trusted_answer": true,
   "answer": "最近 30 天销售额最高的 Top 5 商品分别是人体工学椅、咖啡机、冲锋衣、空气炸锅和智能电饭煲，其中人体工学椅排名第一。Top 1 人体工学椅 比 Top 2 咖啡机 高 28.0%，头部差距明显。",
-  "error": null
+  "error": null,
+  "error_code": null
 }
 ```
 
@@ -296,7 +312,7 @@ curl -X POST "http://127.0.0.1:8000/api/query-logs/1/feedback" ^
 curl "http://127.0.0.1:8000/api/security/policies"
 ```
 
-返回当前 SQL 安全策略，例如只允许 `SELECT`、禁止多语句、禁止 `SELECT *`、白名单表和最大 `LIMIT`。
+返回当前 SQL 安全策略，例如只允许 `SELECT`、禁止多语句、禁止 `SELECT *`、白名单表、白名单字段、最大 `LIMIT` 和查询超时。
 
 ### 数据源管理
 
@@ -309,7 +325,7 @@ curl "http://127.0.0.1:8000/api/data-sources"
 ```bash
 curl -X POST "http://127.0.0.1:8000/api/data-sources" ^
   -H "Content-Type: application/json" ^
-  -d "{\"name\":\"orders_only\",\"db_type\":\"sqlite\",\"database_url\":\"data/datapilot.db\",\"allowed_tables\":[\"orders\"]}"
+  -d "{\"name\":\"orders_only\",\"db_type\":\"sqlite\",\"database_url\":\"data/datapilot.db\",\"allowed_tables\":[\"orders\"],\"allowed_columns\":{\"orders\":[\"id\",\"product_name\",\"amount\",\"created_at\"]}}"
 ```
 
 测试数据源：
@@ -320,6 +336,48 @@ curl -X POST "http://127.0.0.1:8000/api/data-sources/1/test"
 
 当前阶段 SQLite 数据源会真实检查数据库文件和白名单表；MySQL/PostgreSQL 先支持配置登记，真实连接执行留到下一阶段接入驱动。
 
+### 数据目录
+
+查看当前数据源可查询表：
+
+```bash
+curl "http://127.0.0.1:8000/api/catalog/tables"
+```
+
+查看字段目录和字段权限：
+
+```bash
+curl "http://127.0.0.1:8000/api/catalog/tables/products/columns"
+```
+
+指定数据源：
+
+```bash
+curl "http://127.0.0.1:8000/api/catalog/tables/products/columns?data_source_id=1"
+```
+
+### 指标管理
+
+```bash
+curl "http://127.0.0.1:8000/api/metrics"
+```
+
+新增指标：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/metrics" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"metric_key\":\"repeat_order_count\",\"name\":\"复购订单数\",\"expression\":\"COUNT(orders.id)\",\"description\":\"重复购买订单数量。\"}"
+```
+
+禁用指标：
+
+```bash
+curl -X PUT "http://127.0.0.1:8000/api/metrics/1" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"enabled\":false}"
+```
+
 ## SQL 安全策略
 
 SQL 执行前必须通过 `validate_sql`：
@@ -329,8 +387,10 @@ SQL 执行前必须通过 `validate_sql`：
 - 禁止注释和多语句
 - 禁止 `SELECT *`
 - 只允许访问当前数据源配置的白名单表
+- 只允许访问当前数据源配置的白名单字段
 - 没有 `LIMIT` 时自动追加 `LIMIT 100`
 - `LIMIT` 超过 100 时自动收敛为 `LIMIT 100`
+- SQLite 查询执行默认超时时间为 `QUERY_TIMEOUT_SECONDS=5`
 - 使用 SQLGlot 做 AST 级别校验
 
 ## 语义层、可信答案、查询日志、图表推荐和洞察
@@ -341,7 +401,7 @@ SQL 执行前必须通过 `validate_sql`：
 docs/semantic-trusted-logging-chart-design.md
 ```
 
-后端会把业务指标口径注入给 DeepSeek；常见问题命中可信 SQL；每次查询写入 `query_logs`；接口返回 `chart` 字段给未来前端使用。数据源白名单会同时作用于 schema 注入和 SQL 安全校验。
+后端会从 `metrics` 表读取启用指标并注入给 DeepSeek；常见问题命中可信 SQL；每次查询写入 `query_logs`；接口返回 `chart` 字段给未来前端使用。数据源白名单会同时作用于 schema 注入和 SQL 安全校验。
 
 `insights` 字段使用确定性规则生成，不让 LLM 编造异常结论。当前支持：
 
@@ -440,11 +500,14 @@ Content-Type: application/json
 GET http://127.0.0.1:8000/api/query-logs
 GET http://127.0.0.1:8000/api/query-stats
 GET http://127.0.0.1:8000/api/data-sources
+GET http://127.0.0.1:8000/api/catalog/tables
+GET http://127.0.0.1:8000/api/catalog/tables/products/columns
+GET http://127.0.0.1:8000/api/metrics
 POST http://127.0.0.1:8000/api/query-logs/{id}/feedback
 GET http://127.0.0.1:8000/api/security/policies
 ```
 
-讲解查询日志和统计接口用于观察高频问题、失败问题、慢查询和图表使用分布，数据源白名单用于限制可查询表，用户反馈用于沉淀可信答案和优化语义层。
+讲解查询日志和统计接口用于观察高频问题、失败问题、慢查询和图表使用分布，数据源白名单和字段白名单用于限制可查询数据范围，数据目录用于展示表字段元数据，指标管理让语义层从硬编码升级为可配置，用户反馈用于沉淀可信答案和优化语义层。
 
 6. 演示工程化能力：
 

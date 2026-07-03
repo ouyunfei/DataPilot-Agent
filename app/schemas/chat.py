@@ -22,6 +22,7 @@ class ChatResponse(BaseModel):
     trusted_answer: bool = False
     answer: str = ""
     error: str | None = None
+    error_code: str | None = None
 
 
 class QueryLogItem(BaseModel):
@@ -32,6 +33,7 @@ class QueryLogItem(BaseModel):
     chart_type: str
     row_count: int
     error: str | None = None
+    error_code: str | None = None
     feedback: str | None = None
     feedback_note: str | None = None
     duration_ms: int
@@ -64,7 +66,39 @@ class QueryStatsResponse(BaseModel):
     average_duration_ms: float
     chart_type_counts: dict[str, int] = Field(default_factory=dict)
     feedback_counts: dict[str, int] = Field(default_factory=dict)
+    error_code_counts: dict[str, int] = Field(default_factory=dict)
     top_questions: list[TopQuestionItem] = Field(default_factory=list)
+
+
+class MetricItem(BaseModel):
+    id: int
+    metric_key: str
+    name: str
+    expression: str
+    description: str
+    enabled: bool
+    created_at: str
+    updated_at: str
+
+
+class MetricListResponse(BaseModel):
+    items: list[MetricItem] = Field(default_factory=list)
+
+
+class MetricCreateRequest(BaseModel):
+    metric_key: str = Field(..., min_length=2, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    name: str = Field(..., min_length=1, max_length=100)
+    expression: str = Field(..., min_length=1, max_length=500)
+    description: str = Field(..., min_length=1, max_length=500)
+    enabled: bool = True
+
+
+class MetricUpdateRequest(BaseModel):
+    metric_key: str | None = Field(default=None, min_length=2, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    expression: str | None = Field(default=None, min_length=1, max_length=500)
+    description: str | None = Field(default=None, min_length=1, max_length=500)
+    enabled: bool | None = None
 
 
 class DataSourceCreateRequest(BaseModel):
@@ -72,6 +106,7 @@ class DataSourceCreateRequest(BaseModel):
     db_type: Literal["sqlite", "mysql", "postgresql"]
     database_url: str = Field(..., min_length=1, max_length=1000)
     allowed_tables: list[str] = Field(..., min_length=1)
+    allowed_columns: dict[str, list[str]] | None = None
     is_default: bool = False
 
 
@@ -81,6 +116,7 @@ class DataSourceItem(BaseModel):
     db_type: str
     database_url: str
     allowed_tables: list[str]
+    allowed_columns: dict[str, list[str]]
     is_default: bool
     created_at: str
 
@@ -107,5 +143,29 @@ class SecurityPolicyResponse(BaseModel):
     forbid_comments: bool
     forbid_select_star: bool
     allowed_tables: list[str]
+    allowed_columns: dict[str, list[str]]
     forbidden_keywords: list[str]
     max_limit: int
+    query_timeout_seconds: float
+
+
+class CatalogTableItem(BaseModel):
+    name: str
+    description: str
+    queryable: bool
+
+
+class CatalogTableListResponse(BaseModel):
+    items: list[CatalogTableItem] = Field(default_factory=list)
+
+
+class CatalogColumnItem(BaseModel):
+    name: str
+    type: str
+    description: str
+    queryable: bool
+
+
+class CatalogColumnListResponse(BaseModel):
+    table: str
+    columns: list[CatalogColumnItem] = Field(default_factory=list)

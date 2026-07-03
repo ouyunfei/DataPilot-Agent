@@ -1,7 +1,10 @@
 from fastapi import APIRouter, HTTPException, Query
 
 from app.agent.workflow import DataAnalysisAgent
+from app.core.config import QUERY_TIMEOUT_SECONDS
 from app.schemas.chat import (
+    CatalogColumnListResponse,
+    CatalogTableListResponse,
     ChatRequest,
     ChatResponse,
     DataSourceCreateRequest,
@@ -9,6 +12,10 @@ from app.schemas.chat import (
     DataSourceListResponse,
     DataSourceTestResponse,
     FeedbackResponse,
+    MetricCreateRequest,
+    MetricItem,
+    MetricListResponse,
+    MetricUpdateRequest,
     QueryLogFeedbackRequest,
     QueryLogListResponse,
     QueryStatsResponse,
@@ -39,6 +46,7 @@ def create_chat_router(agent: DataAnalysisAgent) -> APIRouter:
             trusted_answer=result.get("trusted_answer", False),
             answer=result.get("answer", ""),
             error=result.get("error"),
+            error_code=result.get("error_code"),
         )
 
     @router.get("/data-sources", response_model=DataSourceListResponse)
@@ -53,6 +61,7 @@ def create_chat_router(agent: DataAnalysisAgent) -> APIRouter:
                 db_type=request.db_type,
                 database_url=request.database_url,
                 allowed_tables=request.allowed_tables,
+                allowed_columns=request.allowed_columns,
                 is_default=request.is_default,
             )
         except Exception as exc:
@@ -72,6 +81,65 @@ def create_chat_router(agent: DataAnalysisAgent) -> APIRouter:
     @router.get("/query-stats", response_model=QueryStatsResponse)
     def query_stats() -> QueryStatsResponse:
         return QueryStatsResponse(**agent.db.get_query_stats())
+
+    @router.get("/catalog/tables", response_model=CatalogTableListResponse)
+    def catalog_tables(data_source_id: int | None = None) -> CatalogTableListResponse:
+        if data_source_id is not None and agent.db.get_data_source(data_source_id) is None:
+            raise HTTPException(status_code=404, detail="data source not found")
+        return CatalogTableListResponse(items=agent.db.list_catalog_tables(data_source_id))
+
+    @router.get("/catalog/tables/{table_name}/columns", response_model=CatalogColumnListResponse)
+    def catalog_columns(
+        table_name: str,
+        data_source_id: int | None = None,
+    ) -> CatalogColumnListResponse:
+        if data_source_id is not None and agent.db.get_data_source(data_source_id) is None:
+            raise HTTPException(status_code=404, detail="data source not found")
+        columns = agent.db.list_catalog_columns(table_name, data_source_id)
+        if not columns:
+            raise HTTPException(status_code=404, detail="table not found")
+        return CatalogColumnListResponse(table=table_name, columns=columns)
+
+    @router.get("/metrics", response_model=MetricListResponse)
+    def metrics(enabled_only: bool = False) -> MetricListResponse:
+        return MetricListResponse(items=agent.db.list_metrics(enabled_only=enabled_only))
+
+    @router.post("/metrics", response_model=MetricItem)
+    def create_metric(request: MetricCreateRequest) -> MetricItem:
+        try:
+            metric = agent.db.create_metric(
+                metric_key=request.metric_key,
+                name=request.name,
+                expression=request.expression,
+                description=request.description,
+                enabled=request.enabled,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return MetricItem(**metric)
+
+    @router.put("/metrics/{metric_id}", response_model=MetricItem)
+    def update_metric(metric_id: int, request: MetricUpdateRequest) -> MetricItem:
+        try:
+            metric = agent.db.update_metric(
+                metric_id=metric_id,
+                metric_key=request.metric_key,
+                name=request.name,
+                expression=request.expression,
+                description=request.description,
+                enabled=request.enabled,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if metric is None:
+            raise HTTPException(status_code=404, detail="metric not found")
+        return MetricItem(**metric)
+
+    @router.delete("/metrics/{metric_id}", response_model=FeedbackResponse)
+    def delete_metric(metric_id: int) -> FeedbackResponse:
+        if not agent.db.delete_metric(metric_id):
+            raise HTTPException(status_code=404, detail="metric not found")
+        return FeedbackResponse(ok=True)
 
     @router.post("/query-logs/{log_id}/feedback", response_model=FeedbackResponse)
     def save_query_feedback(
@@ -103,8 +171,10 @@ def create_chat_router(agent: DataAnalysisAgent) -> APIRouter:
             forbid_comments=True,
             forbid_select_star=True,
             allowed_tables=sorted(source["allowed_tables"]),
+            allowed_columns=source["allowed_columns"],
             forbidden_keywords=sorted(FORBIDDEN_KEYWORDS),
             max_limit=MAX_LIMIT,
+            query_timeout_seconds=QUERY_TIMEOUT_SECONDS,
         )
 
     return router

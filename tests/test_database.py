@@ -1,4 +1,5 @@
 from app.db.database import SQLiteDatabase
+import pytest
 
 
 def test_database_initializes_three_tables_and_returns_join_rows(tmp_path):
@@ -164,3 +165,73 @@ def test_database_sqlite_source_test_fails_when_whitelist_table_missing(tmp_path
 
     assert result["ok"] is False
     assert "missing_table" in result["message"]
+
+
+def test_database_creates_data_source_with_column_whitelist_and_catalog(tmp_path):
+    database_path = tmp_path / "orders.db"
+    db = SQLiteDatabase(database_path)
+    db.initialize()
+
+    source = db.create_data_source(
+        name="products_public",
+        db_type="sqlite",
+        database_url=str(database_path),
+        allowed_tables=["products"],
+        allowed_columns={"products": ["id", "product_name", "brand"]},
+    )
+    tables = db.list_catalog_tables(source["id"])
+    columns = db.list_catalog_columns("products", source["id"])
+
+    assert source["allowed_columns"]["products"] == ["id", "product_name", "brand"]
+    assert tables == [{"name": "products", "description": "商品维度表", "queryable": True}]
+    assert next(column for column in columns if column["name"] == "brand")["queryable"] is True
+    assert next(column for column in columns if column["name"] == "cost_price")["queryable"] is False
+
+
+def test_database_execute_select_can_timeout(tmp_path):
+    db = SQLiteDatabase(tmp_path / "orders.db")
+    db.initialize()
+
+    with pytest.raises(TimeoutError):
+        db.execute_select(
+            """
+            WITH RECURSIVE cnt(x) AS (
+                SELECT 1
+                UNION ALL
+                SELECT x + 1 FROM cnt WHERE x < 100000000
+            )
+            SELECT x FROM cnt
+            """,
+            timeout_seconds=0,
+        )
+
+
+def test_database_initializes_default_metrics(tmp_path):
+    db = SQLiteDatabase(tmp_path / "orders.db")
+    db.initialize()
+
+    metrics = db.list_metrics()
+
+    names = {metric["name"] for metric in metrics}
+    assert {"销售额", "退款率", "客单价", "毛利", "订单数"} <= names
+
+
+def test_database_can_create_update_and_delete_metric(tmp_path):
+    db = SQLiteDatabase(tmp_path / "orders.db")
+    db.initialize()
+
+    created = db.create_metric(
+        metric_key="repeat_order_count",
+        name="复购订单数",
+        expression="COUNT(orders.id)",
+        description="重复购买订单数量。",
+    )
+    assert created["enabled"] is True
+
+    updated = db.update_metric(created["id"], enabled=False)
+    enabled_names = {metric["name"] for metric in db.list_metrics(enabled_only=True)}
+
+    assert updated is not None
+    assert updated["enabled"] is False
+    assert "复购订单数" not in enabled_names
+    assert db.delete_metric(created["id"]) is True

@@ -88,6 +88,27 @@ class UsersTableLLMClient:
         return "用户查询结果。"
 
 
+class ProductCostLLMClient:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def generate_sql(self, question: str, schema: str) -> SQLGeneration:
+        self.prompts.append(schema)
+        return SQLGeneration(
+            sql="SELECT p.cost_price FROM products p LIMIT 5",
+            sql_explanation="查询商品成本价。",
+        )
+
+    def analyze_result(
+        self,
+        question: str,
+        sql: str,
+        sql_explanation: str,
+        rows: list[dict],
+    ) -> str:
+        return "不应该执行到这里"
+
+
 def test_chat_returns_sql_data_and_chinese_answer(tmp_path):
     app = create_app(database_path=tmp_path / "chat.db", llm=FakeLLMClient())
     client = TestClient(app)
@@ -120,6 +141,7 @@ def test_chat_returns_error_when_generated_sql_is_unsafe(tmp_path):
     assert payload["data"] == []
     assert payload["answer"] == ""
     assert payload["sql_explanation"] == "尝试删除订单数据。"
+    assert payload["error_code"] == "sql_safety_error"
     assert "只允许执行 SELECT 查询" in payload["error"]
 
 
@@ -399,3 +421,112 @@ def test_query_stats_returns_operational_metrics(tmp_path):
     assert payload["average_duration_ms"] >= 0
     assert payload["chart_type_counts"]["bar"] == 1
     assert payload["top_questions"]
+    assert payload["error_code_counts"]["sql_safety_error"] == 1
+
+
+def test_metrics_can_be_created_listed_updated_and_deleted(tmp_path):
+    app = create_app(database_path=tmp_path / "metrics.db", llm=FakeLLMClient())
+    client = TestClient(app)
+
+    list_response = client.get("/api/metrics")
+    assert list_response.status_code == 200
+    assert "销售额" in {item["name"] for item in list_response.json()["items"]}
+
+    create_response = client.post(
+        "/api/metrics",
+        json={
+            "metric_key": "repeat_order_count",
+            "name": "复购订单数",
+            "expression": "COUNT(orders.id)",
+            "description": "重复购买订单数量。",
+        },
+    )
+    assert create_response.status_code == 200
+    created = create_response.json()
+
+    update_response = client.put(
+        f"/api/metrics/{created['id']}",
+        json={"enabled": False},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["enabled"] is False
+
+    delete_response = client.delete(f"/api/metrics/{created['id']}")
+    assert delete_response.status_code == 200
+    assert delete_response.json()["ok"] is True
+
+
+def test_chat_injects_configured_metrics_into_prompt(tmp_path):
+    llm = FakeLLMClient()
+    app = create_app(database_path=tmp_path / "metric-prompt.db", llm=llm)
+    client = TestClient(app)
+
+    client.post(
+        "/api/metrics",
+        json={
+            "metric_key": "repeat_order_count",
+            "name": "复购订单数",
+            "expression": "COUNT(orders.id)",
+            "description": "重复购买订单数量。",
+        },
+    )
+    response = client.post("/api/chat", json={"question": "请按商品统计销售额排名"})
+
+    assert response.status_code == 200
+    assert "复购订单数" in llm.prompts[0]
+
+
+def test_catalog_endpoints_return_table_and_column_permissions(tmp_path):
+    database_path = tmp_path / "catalog.db"
+    app = create_app(database_path=database_path, llm=FakeLLMClient())
+    client = TestClient(app)
+    source = client.post(
+        "/api/data-sources",
+        json={
+            "name": "products_public",
+            "db_type": "sqlite",
+            "database_url": str(database_path),
+            "allowed_tables": ["products"],
+            "allowed_columns": {"products": ["id", "product_name", "brand"]},
+        },
+    ).json()
+
+    tables = client.get(f"/api/catalog/tables?data_source_id={source['id']}").json()["items"]
+    columns = client.get(
+        f"/api/catalog/tables/products/columns?data_source_id={source['id']}"
+    ).json()["columns"]
+
+    assert tables == [{"name": "products", "description": "商品维度表", "queryable": True}]
+    assert next(column for column in columns if column["name"] == "brand")["queryable"] is True
+    assert next(column for column in columns if column["name"] == "cost_price")["queryable"] is False
+
+
+def test_chat_blocks_non_whitelisted_columns_and_hides_them_from_prompt(tmp_path):
+    llm = ProductCostLLMClient()
+    database_path = tmp_path / "column-whitelist.db"
+    app = create_app(database_path=database_path, llm=llm)
+    client = TestClient(app)
+    source = client.post(
+        "/api/data-sources",
+        json={
+            "name": "products_public",
+            "db_type": "sqlite",
+            "database_url": str(database_path),
+            "allowed_tables": ["products"],
+            "allowed_columns": {"products": ["id", "product_name", "brand"]},
+        },
+    ).json()
+
+    response = client.post(
+        "/api/chat",
+        json={"question": "查一下商品成本价", "data_source_id": source["id"]},
+    )
+    logs = client.get("/api/query-logs").json()["items"]
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["data"] == []
+    assert payload["error_code"] == "sql_safety_error"
+    assert "cost_price" in payload["error"]
+    assert "cost_price" not in llm.prompts[0]
+    assert logs[0]["error_code"] == "sql_safety_error"

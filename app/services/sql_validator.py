@@ -29,7 +29,11 @@ ALLOWED_TABLES = {"orders", "users", "products"}
 MAX_LIMIT = 100
 
 
-def validate_select_sql(sql: str, allowed_tables: set[str] | None = None) -> str:
+def validate_select_sql(
+    sql: str,
+    allowed_tables: set[str] | None = None,
+    allowed_columns: dict[str, set[str]] | None = None,
+) -> str:
     allowed_tables = ALLOWED_TABLES if allowed_tables is None else allowed_tables
     normalized = sql.strip()
     if not normalized:
@@ -68,6 +72,9 @@ def validate_select_sql(sql: str, allowed_tables: set[str] | None = None) -> str
         names = "、".join(sorted(disallowed_tables))
         raise SQLSafetyError(f"SQL 不安全：禁止访问非白名单表 {names}")
 
+    if allowed_columns is not None:
+        _validate_allowed_columns(expression, allowed_columns, table_names)
+
     expression = _enforce_limit(expression)
     return expression.sql(dialect="sqlite")
 
@@ -90,6 +97,46 @@ def _has_select_star_projection(expression: exp.Select) -> bool:
         if isinstance(projection, exp.Column) and isinstance(projection.this, exp.Star):
             return True
     return False
+
+
+def _validate_allowed_columns(
+    expression: exp.Select,
+    allowed_columns: dict[str, set[str]],
+    table_names: set[str],
+) -> None:
+    normalized_columns = {
+        table.lower(): {column.lower() for column in columns}
+        for table, columns in allowed_columns.items()
+    }
+    table_aliases = {
+        (table.alias_or_name or table.name).lower(): table.name.lower()
+        for table in expression.find_all(exp.Table)
+    }
+    projection_aliases = {
+        projection.alias.lower()
+        for projection in expression.expressions
+        if projection.alias
+    }
+
+    for column in expression.find_all(exp.Column):
+        column_name = column.name.lower()
+        table_ref = column.table.lower() if column.table else ""
+        if not table_ref and column_name in projection_aliases:
+            continue
+
+        if table_ref:
+            table_name = table_aliases.get(table_ref, table_ref)
+            if column_name not in normalized_columns.get(table_name, set()):
+                raise SQLSafetyError(f"SQL 不安全：禁止访问非白名单字段 {table_name}.{column_name}")
+            continue
+
+        candidates = [
+            table_name
+            for table_name in table_names
+            if column_name in normalized_columns.get(table_name, set())
+        ]
+        if not candidates:
+            raise SQLSafetyError(f"SQL 不安全：禁止访问非白名单字段 {column_name}")
 
 
 def _has_comment(sql: str) -> bool:

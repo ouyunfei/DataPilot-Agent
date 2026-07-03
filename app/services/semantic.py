@@ -1,35 +1,7 @@
 from __future__ import annotations
 
+import re
 from typing import Any
-
-
-METRICS = {
-    "sales_amount": {
-        "name": "销售额",
-        "expression": "SUM(orders.amount)",
-        "description": "已支付订单金额总和。",
-    },
-    "refund_rate": {
-        "name": "退款率",
-        "expression": "退款订单数 / 总订单数",
-        "description": "refund_amount > 0 或 status = 'refunded' 的订单占比。",
-    },
-    "average_order_value": {
-        "name": "客单价",
-        "expression": "SUM(orders.amount) / COUNT(DISTINCT orders.id)",
-        "description": "平均每笔订单金额。",
-    },
-    "gross_profit": {
-        "name": "毛利",
-        "expression": "SUM(orders.amount - products.cost_price)",
-        "description": "订单金额减商品成本价后的金额。",
-    },
-    "order_count": {
-        "name": "订单数",
-        "expression": "COUNT(orders.id)",
-        "description": "订单明细数量。",
-    },
-}
 
 
 TRUSTED_ANSWERS = {
@@ -65,14 +37,39 @@ TRUSTED_ANSWERS = {
 }
 
 
-def build_semantic_context(allowed_tables: list[str] | None = None) -> str:
-    allowed = set(allowed_tables or ["orders", "users", "products"])
+def build_semantic_context(
+    metrics: list[dict[str, Any]],
+    allowed_tables: list[str] | None = None,
+    allowed_columns: dict[str, list[str]] | None = None,
+) -> str:
+    allowed = {table.lower() for table in allowed_tables or []}
+    column_whitelist = {
+        table.lower(): {column.lower() for column in columns}
+        for table, columns in (allowed_columns or {}).items()
+    }
     lines = ["业务语义层指标："]
-    for metric in METRICS.values():
+    added = 0
+    for metric in metrics:
         expression = metric["expression"]
-        if any(f"{table}." in expression for table in {"orders", "users", "products"} - allowed):
+        referenced_tables = {
+            match.group(1).lower() for match in re.finditer(r"\b([A-Za-z_][\w]*)\.", expression)
+        }
+        if allowed and referenced_tables - allowed:
+            continue
+        referenced_columns = {
+            (match.group(1).lower(), match.group(2).lower())
+            for match in re.finditer(r"\b([A-Za-z_][\w]*)\.([A-Za-z_][\w]*)\b", expression)
+        }
+        if any(
+            column not in column_whitelist.get(table, set())
+            for table, column in referenced_columns
+            if column_whitelist
+        ):
             continue
         lines.append(f"- {metric['name']}：{metric['description']}计算口径：{metric['expression']}")
+        added += 1
+    if added == 0:
+        lines.append("- 暂无启用指标。")
     return "\n".join(lines)
 
 
