@@ -10,10 +10,11 @@
 - LangGraph 编排数据分析工作流
 - DeepSeek 生成 SQL、SQL 解释和中文分析结论
 - SQLite 自动初始化订单、用户、商品三张示例表
+- PostgreSQL / MySQL 真实数据源接入，Docker 提供本地示例库
 - SQLGlot AST 安全校验
 - 强制 `LIMIT`，最大返回 100 行
 - 禁止 `SELECT *` 和非白名单表访问
-- 数据源管理：支持 SQLite / MySQL / PostgreSQL 配置登记
+- 数据源管理：支持 SQLite / MySQL / PostgreSQL 连接、目录读取和只读查询
 - 表权限白名单：每个数据源独立配置允许查询的表
 - 字段级权限白名单：每个数据源独立配置允许查询的字段
 - 数据目录接口：查看可查询表、字段、字段类型和字段说明
@@ -47,7 +48,9 @@ DataPilot-Agent/
 │   ├── core/
 │   │   └── config.py            # 配置和环境变量
 │   ├── db/
-│   │   └── database.py          # SQLite 初始化、schema 获取、查询执行
+│   │   ├── database.py          # SQLite 初始化、数据源、日志、schema 获取、查询执行
+│   │   ├── mysql.py             # MySQL 连接、目录读取、查询执行
+│   │   └── postgres.py          # PostgreSQL 连接、目录读取、查询执行
 │   ├── schemas/
 │   │   └── chat.py              # Pydantic 请求/响应模型
 │   ├── services/
@@ -67,6 +70,8 @@ DataPilot-Agent/
 ├── .github/workflows/ci.yml
 ├── Dockerfile
 ├── docker-compose.yml
+├── docker/mysql/init.sql        # MySQL 示例库初始化脚本
+├── docker/postgres/init.sql     # PostgreSQL 示例库初始化脚本
 ├── .env.example
 └── requirements.txt
 ```
@@ -161,6 +166,7 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_TIMEOUT_SECONDS=30
 QUERY_TIMEOUT_SECONDS=5
+POSTGRES_EXAMPLE_URL=postgresql://datapilot:datapilot123@127.0.0.1:5432/datapilot
 ```
 
 启动服务：
@@ -188,6 +194,18 @@ copy .env.example .env
 
 ```bash
 docker compose up --build
+```
+
+只启动本地 PostgreSQL 示例库：
+
+```bash
+docker compose up -d postgres
+```
+
+只启动本地 MySQL 示例库：
+
+```bash
+docker compose up -d mysql
 ```
 
 启动后访问：
@@ -334,7 +352,60 @@ curl -X POST "http://127.0.0.1:8000/api/data-sources" ^
 curl -X POST "http://127.0.0.1:8000/api/data-sources/1/test"
 ```
 
-当前阶段 SQLite 数据源会真实检查数据库文件和白名单表；MySQL/PostgreSQL 先支持配置登记，真实连接执行留到下一阶段接入驱动。
+SQLite、PostgreSQL 和 MySQL 数据源都会真实检查白名单表和字段，并支持 `/api/chat` 只读查询。MySQL 数据源必须显式提供每张白名单表的 `allowed_columns`。
+
+本地 Docker PostgreSQL 示例库连接串：
+
+```text
+postgresql://datapilot:datapilot123@127.0.0.1:5432/datapilot
+```
+
+如果后端也运行在 `docker compose` 容器内，使用服务名：
+
+```text
+postgresql://datapilot:datapilot123@postgres:5432/datapilot
+```
+
+创建 PostgreSQL 数据源：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/data-sources" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"name\":\"local_postgres\",\"db_type\":\"postgresql\",\"database_url\":\"postgresql://datapilot:datapilot123@127.0.0.1:5432/datapilot\",\"allowed_tables\":[\"orders\",\"users\",\"products\"],\"allowed_columns\":{\"orders\":[\"id\",\"user_id\",\"product_id\",\"product_name\",\"category\",\"city\",\"amount\",\"status\",\"created_at\",\"refund_amount\"],\"users\":[\"id\",\"name\",\"city\",\"level\",\"registered_at\"],\"products\":[\"id\",\"product_name\",\"category\",\"brand\",\"cost_price\",\"list_price\"]}}"
+```
+
+测试 PostgreSQL 数据源：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/data-sources/{id}/test"
+```
+
+指定 PostgreSQL 数据源问数：
+
+```json
+{
+  "question": "最近 30 天销售额最高的 5 个商品是什么？",
+  "data_source_id": 2
+}
+```
+
+本地 Docker MySQL 示例库连接串：
+
+```text
+mysql://datapilot_ro:datapilot123@127.0.0.1:3307/datapilot
+```
+
+如果后端运行在 `docker compose` 容器内，连接地址使用 `mysql://datapilot_ro:datapilot123@mysql:3306/datapilot`。宿主机端口默认是 `3307`，可通过 `MYSQL_PORT` 覆盖。
+
+创建 MySQL 数据源：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/data-sources" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"name\":\"local_mysql\",\"db_type\":\"mysql\",\"database_url\":\"mysql://datapilot_ro:datapilot123@127.0.0.1:3307/datapilot\",\"allowed_tables\":[\"orders\",\"users\",\"products\"],\"allowed_columns\":{\"orders\":[\"id\",\"user_id\",\"product_id\",\"product_name\",\"category\",\"city\",\"amount\",\"status\",\"created_at\",\"refund_amount\"],\"users\":[\"id\",\"name\",\"city\",\"level\",\"registered_at\"],\"products\":[\"id\",\"product_name\",\"category\",\"brand\",\"cost_price\",\"list_price\"]}}"
+```
+
+创建和列表接口会把连接密码显示为 `***`。本地初始化脚本负责建表和造数，Agent 查询链路仍然只允许执行 `SELECT`；接入真实数据库时应使用只读账号。
 
 ### 数据目录
 
@@ -390,7 +461,7 @@ SQL 执行前必须通过 `validate_sql`：
 - 只允许访问当前数据源配置的白名单字段
 - 没有 `LIMIT` 时自动追加 `LIMIT 100`
 - `LIMIT` 超过 100 时自动收敛为 `LIMIT 100`
-- SQLite 查询执行默认超时时间为 `QUERY_TIMEOUT_SECONDS=5`
+- SQLite / PostgreSQL / MySQL 查询执行默认超时时间为 `QUERY_TIMEOUT_SECONDS=5`
 - 使用 SQLGlot 做 AST 级别校验
 
 ## 语义层、可信答案、查询日志、图表推荐和洞察
@@ -482,7 +553,7 @@ Content-Type: application/json
 }
 ```
 
-讲解链路：LangGraph 获取 schema 和语义层，优先命中可信 SQL，经过 SQLGlot 安全校验后执行 SQLite 查询，再生成中文 Top 5 总结、规则洞察和图表推荐。
+讲解链路：LangGraph 获取 schema 和语义层，SQLite 高频问题优先命中可信 SQL，经过 SQLGlot 安全校验后执行 SQLite、PostgreSQL 或 MySQL 查询，再生成中文 Top 5 总结、规则洞察和图表推荐。
 
 4. 演示危险 SQL 拦截：
 
@@ -513,6 +584,8 @@ GET http://127.0.0.1:8000/api/security/policies
 
 ```text
 docker compose up --build
+docker compose up -d postgres
+docker compose up -d mysql
 python -m pytest -q
 python scripts/run_evals.py
 ```
@@ -521,9 +594,7 @@ python scripts/run_evals.py
 
 ## 后续扩展方向
 
-- 接入真实 MySQL/PostgreSQL 驱动，让已登记的数据源可以真实执行查询
 - 加入 Qdrant：存储业务指标解释、字段口径和历史查询样例，增强 schema 理解
 - 加入 Redis：缓存 schema、热门查询结果和会话上下文
 - 加入 Celery：处理耗时查询、异步报表和定时分析任务
 - 多智能体拆分：Schema Agent、SQL Agent、SQL Review Agent、Insight Agent
-- Docker 化：提供统一开发和部署环境

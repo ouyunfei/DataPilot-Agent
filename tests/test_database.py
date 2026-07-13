@@ -31,6 +31,26 @@ def test_database_initializes_three_tables_and_returns_join_rows(tmp_path):
     assert {"user_name", "product_name", "total_amount"} <= rows[0].keys()
 
 
+def test_database_seeds_enough_demo_data_for_analytics(tmp_path):
+    db = SQLiteDatabase(tmp_path / "orders.db")
+    db.initialize()
+
+    counts = db.execute_select(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM users) AS user_count,
+            (SELECT COUNT(*) FROM products) AS product_count,
+            (SELECT COUNT(*) FROM orders) AS order_count,
+            (SELECT COUNT(DISTINCT DATE(created_at)) FROM orders) AS active_days
+        """
+    )[0]
+
+    assert counts["user_count"] >= 80
+    assert counts["product_count"] >= 30
+    assert counts["order_count"] >= 1000
+    assert counts["active_days"] >= 90
+
+
 def test_database_initializes_query_logs_and_can_write_log(tmp_path):
     db = SQLiteDatabase(tmp_path / "orders.db")
     db.initialize()

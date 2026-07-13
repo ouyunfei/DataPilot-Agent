@@ -33,6 +33,7 @@ def validate_select_sql(
     sql: str,
     allowed_tables: set[str] | None = None,
     allowed_columns: dict[str, set[str]] | None = None,
+    dialect: str = "sqlite",
 ) -> str:
     allowed_tables = ALLOWED_TABLES if allowed_tables is None else allowed_tables
     normalized = sql.strip()
@@ -56,7 +57,7 @@ def validate_select_sql(
             raise SQLSafetyError(f"SQL 不安全：禁止使用 {keyword} 语句")
 
     try:
-        expression = sqlglot.parse_one(normalized, read="sqlite")
+        expression = sqlglot.parse_one(normalized, read=dialect)
     except sqlglot.errors.ParseError as exc:
         raise SQLSafetyError(f"SQL 不安全：SQL 解析失败：{exc}") from exc
 
@@ -76,7 +77,7 @@ def validate_select_sql(
         _validate_allowed_columns(expression, allowed_columns, table_names)
 
     expression = _enforce_limit(expression)
-    return expression.sql(dialect="sqlite")
+    return expression.sql(dialect=dialect)
 
 
 def _enforce_limit(expression: exp.Select) -> exp.Select:

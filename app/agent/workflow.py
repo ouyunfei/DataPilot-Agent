@@ -142,7 +142,7 @@ class DataAnalysisAgent:
 
     def _retrieve_schema(self, state: AnalysisState) -> dict[str, str]:
         schema = (
-            f"{self.db.get_schema_description(state['data_source']['allowed_tables'], state['data_source']['allowed_columns'])}"
+            f"{self.db.get_data_source_schema_description(state['data_source'])}"
             f"\n\n{build_semantic_context(self.db.list_metrics(enabled_only=True), state['data_source']['allowed_tables'], state['data_source']['allowed_columns'])}"
         )
         if state.get("session_context"):
@@ -150,7 +150,11 @@ class DataAnalysisAgent:
         return {"schema": schema}
 
     def _generate_sql(self, state: AnalysisState) -> dict[str, str | bool]:
-        trusted_answer = find_trusted_answer(state["question"])
+        trusted_answer = (
+            find_trusted_answer(state["question"])
+            if state["data_source"]["db_type"] == "sqlite"
+            else None
+        )
         if trusted_answer:
             return {
                 "sql": trusted_answer["sql"],
@@ -189,6 +193,11 @@ class DataAnalysisAgent:
                     table: set(columns)
                     for table, columns in state["data_source"]["allowed_columns"].items()
                 },
+                dialect={
+                    "sqlite": "sqlite",
+                    "postgresql": "postgres",
+                    "mysql": "mysql",
+                }[state["data_source"]["db_type"]],
             )
         except SQLSafetyError as exc:
             return {"error": str(exc), "error_code": "sql_safety_error", "validated_sql": ""}
@@ -201,17 +210,17 @@ class DataAnalysisAgent:
         }
 
     def _execute_sql(self, state: AnalysisState) -> dict[str, list[dict[str, Any]] | str | None]:
-        if state["data_source"]["db_type"] != "sqlite":
+        if state["data_source"]["db_type"] not in {"sqlite", "postgresql", "mysql"}:
             return {
                 "data": [],
-                "error": "当前阶段仅支持 SQLite 数据源执行查询",
+                "error": "当前阶段仅支持 SQLite、PostgreSQL 和 MySQL 数据源执行查询",
                 "error_code": "data_source_error",
             }
 
         try:
-            rows = self.db.execute_select(
+            rows = self.db.execute_data_source_select(
+                state["data_source"],
                 state["validated_sql"],
-                database_url=state["data_source"]["database_url"],
                 timeout_seconds=QUERY_TIMEOUT_SECONDS,
             )
         except TimeoutError as exc:

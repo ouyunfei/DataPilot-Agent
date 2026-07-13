@@ -109,6 +109,80 @@ class ProductCostLLMClient:
         return "不应该执行到这里"
 
 
+class PostgresLLMClient:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def generate_sql(self, question: str, schema: str) -> SQLGeneration:
+        self.prompts.append(schema)
+        return SQLGeneration(
+            sql="""
+            SELECT
+                product_name,
+                ROUND(SUM(amount), 2) AS total_amount
+            FROM orders
+            WHERE status = 'paid'
+            GROUP BY product_name
+            ORDER BY total_amount DESC
+            LIMIT 5
+            """,
+            sql_explanation="按商品统计 PostgreSQL 订单销售额。",
+        )
+
+    def analyze_result(
+        self,
+        question: str,
+        sql: str,
+        sql_explanation: str,
+        rows: list[dict],
+    ) -> str:
+        return f"PostgreSQL 查询返回 {len(rows)} 行。"
+
+
+class FakePostgresClient:
+    def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
+
+    def test_connection(self, allowed_tables, allowed_columns):
+        return {"ok": True, "message": "PostgreSQL 数据源连接正常"}
+
+    def list_tables(self):
+        return ["orders", "products"]
+
+    def list_columns(self, table_name):
+        if table_name == "orders":
+            return [
+                {"name": "id", "type": "integer"},
+                {"name": "product_name", "type": "text"},
+                {"name": "amount", "type": "numeric"},
+                {"name": "status", "type": "text"},
+            ]
+        return [
+            {"name": "id", "type": "integer"},
+            {"name": "product_name", "type": "text"},
+            {"name": "cost_price", "type": "numeric"},
+        ]
+
+    def execute_select(self, sql, timeout_seconds=None):
+        return [{"product_name": "无线鼠标", "total_amount": 128.5}]
+
+
+class MySQLLLMClient(PostgresLLMClient):
+    def analyze_result(
+        self,
+        question: str,
+        sql: str,
+        sql_explanation: str,
+        rows: list[dict],
+    ) -> str:
+        return f"MySQL 查询返回 {len(rows)} 行。"
+
+
+class FakeMySQLClient(FakePostgresClient):
+    def test_connection(self, allowed_tables, allowed_columns):
+        return {"ok": True, "message": "MySQL 数据源连接正常"}
+
+
 def test_chat_returns_sql_data_and_chinese_answer(tmp_path):
     app = create_app(database_path=tmp_path / "chat.db", llm=FakeLLMClient())
     client = TestClient(app)
@@ -315,7 +389,8 @@ def test_data_sources_can_be_created_listed_and_tested(tmp_path):
     assert test_response.json()["ok"] is True
 
 
-def test_postgresql_data_source_config_does_not_require_external_connection(tmp_path):
+def test_postgresql_data_source_test_uses_real_checker(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.db.database.PostgresClient", FakePostgresClient, raising=False)
     app = create_app(database_path=tmp_path / "postgres-config.db", llm=FakeLLMClient())
     client = TestClient(app)
 
@@ -333,7 +408,63 @@ def test_postgresql_data_source_config_does_not_require_external_connection(tmp_
 
     assert test_response.status_code == 200
     assert test_response.json()["ok"] is True
-    assert "真实连接待后续接入驱动" in test_response.json()["message"]
+    assert test_response.json()["message"] == "PostgreSQL 数据源连接正常"
+
+
+def test_mysql_data_source_requires_explicit_column_whitelist(tmp_path):
+    app = create_app(database_path=tmp_path / "mysql-config.db", llm=FakeLLMClient())
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/data-sources",
+        json={
+            "name": "warehouse_mysql",
+            "db_type": "mysql",
+            "database_url": "mysql://user:password@localhost:3306/warehouse",
+            "allowed_tables": ["orders"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "allowed_columns" in response.json()["detail"]
+
+    blank_columns = client.post(
+        "/api/data-sources",
+        json={
+            "name": "warehouse_mysql_blank",
+            "db_type": "mysql",
+            "database_url": "mysql://user:password@localhost:3306/warehouse",
+            "allowed_tables": ["orders"],
+            "allowed_columns": {"orders": [" "]},
+        },
+    )
+
+    assert blank_columns.status_code == 400
+    assert "allowed_columns" in blank_columns.json()["detail"]
+
+
+def test_mysql_data_source_test_uses_real_checker_and_masks_password(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.db.database.MySQLClient", FakeMySQLClient, raising=False)
+    app = create_app(database_path=tmp_path / "mysql-source.db", llm=FakeLLMClient())
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/data-sources",
+        json={
+            "name": "warehouse_mysql",
+            "db_type": "mysql",
+            "database_url": "mysql://user:password@localhost:3306/warehouse",
+            "allowed_tables": ["orders"],
+            "allowed_columns": {"orders": ["id", "amount"]},
+        },
+    ).json()
+
+    test_response = client.post(f"/api/data-sources/{created['id']}/test")
+    listed = client.get("/api/data-sources").json()["items"]
+
+    assert created["database_url"] == "mysql://user:***@localhost:3306/warehouse"
+    assert next(item for item in listed if item["id"] == created["id"])["database_url"] == created["database_url"]
+    assert test_response.json() == {"ok": True, "message": "MySQL 数据源连接正常"}
 
 
 def test_chat_uses_data_source_table_whitelist(tmp_path):
@@ -530,3 +661,136 @@ def test_chat_blocks_non_whitelisted_columns_and_hides_them_from_prompt(tmp_path
     assert "cost_price" in payload["error"]
     assert "cost_price" not in llm.prompts[0]
     assert logs[0]["error_code"] == "sql_safety_error"
+
+
+def test_postgresql_catalog_uses_postgres_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.db.database.PostgresClient", FakePostgresClient, raising=False)
+    app = create_app(database_path=tmp_path / "pg-catalog.db", llm=FakeLLMClient())
+    client = TestClient(app)
+    source = client.post(
+        "/api/data-sources",
+        json={
+            "name": "local_pg",
+            "db_type": "postgresql",
+            "database_url": "postgresql://datapilot:datapilot123@localhost:5432/datapilot",
+            "allowed_tables": ["orders", "products"],
+            "allowed_columns": {
+                "orders": ["id", "product_name", "amount", "status"],
+                "products": ["id", "product_name"],
+            },
+        },
+    ).json()
+
+    tables = client.get(f"/api/catalog/tables?data_source_id={source['id']}").json()["items"]
+    columns = client.get(
+        f"/api/catalog/tables/products/columns?data_source_id={source['id']}"
+    ).json()["columns"]
+    hidden_table = client.get(
+        f"/api/catalog/tables/users/columns?data_source_id={source['id']}"
+    )
+
+    assert {table["name"] for table in tables} == {"orders", "products"}
+    assert next(column for column in columns if column["name"] == "product_name")["queryable"] is True
+    assert next(column for column in columns if column["name"] == "cost_price")["queryable"] is False
+    assert hidden_table.status_code == 404
+
+
+def test_mysql_catalog_uses_mysql_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.db.database.MySQLClient", FakeMySQLClient, raising=False)
+    app = create_app(database_path=tmp_path / "mysql-catalog.db", llm=FakeLLMClient())
+    client = TestClient(app)
+    source = client.post(
+        "/api/data-sources",
+        json={
+            "name": "local_mysql",
+            "db_type": "mysql",
+            "database_url": "mysql://datapilot_ro:datapilot123@localhost:3306/datapilot",
+            "allowed_tables": ["orders", "products"],
+            "allowed_columns": {
+                "orders": ["id", "product_name", "amount", "status"],
+                "products": ["id", "product_name"],
+            },
+        },
+    ).json()
+
+    tables = client.get(f"/api/catalog/tables?data_source_id={source['id']}").json()["items"]
+    columns = client.get(
+        f"/api/catalog/tables/products/columns?data_source_id={source['id']}"
+    ).json()["columns"]
+
+    assert {table["name"] for table in tables} == {"orders", "products"}
+    assert next(column for column in columns if column["name"] == "product_name")["queryable"] is True
+    assert next(column for column in columns if column["name"] == "cost_price")["queryable"] is False
+
+
+def test_chat_executes_postgresql_data_source(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.db.database.PostgresClient", FakePostgresClient, raising=False)
+    llm = PostgresLLMClient()
+    app = create_app(database_path=tmp_path / "pg-chat.db", llm=llm)
+    client = TestClient(app)
+    source = client.post(
+        "/api/data-sources",
+        json={
+            "name": "local_pg",
+            "db_type": "postgresql",
+            "database_url": "postgresql://datapilot:datapilot123@localhost:5432/datapilot",
+            "allowed_tables": ["orders"],
+            "allowed_columns": {
+                "orders": ["id", "product_name", "amount", "status"],
+            },
+        },
+    ).json()
+
+    response = client.post(
+        "/api/chat",
+        json={"question": "最近 30 天销售额最高的 5 个商品是什么？", "data_source_id": source["id"]},
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["data"] == [{"product_name": "无线鼠标", "total_amount": 128.5}]
+    assert payload["answer"] == "PostgreSQL 查询返回 1 行。"
+    assert payload["error"] is None
+    assert "SQL 方言：postgresql" in llm.prompts[0]
+
+
+def test_chat_executes_mysql_data_source_with_mysql_dialect(tmp_path, monkeypatch):
+    from app.services.sql_validator import validate_select_sql as real_validate_select_sql
+
+    monkeypatch.setattr("app.db.database.MySQLClient", FakeMySQLClient, raising=False)
+    captured = {}
+
+    def capture_dialect(sql, allowed_tables=None, allowed_columns=None, dialect="sqlite"):
+        captured["dialect"] = dialect
+        return real_validate_select_sql(sql, allowed_tables, allowed_columns, dialect)
+
+    monkeypatch.setattr("app.agent.workflow.validate_select_sql", capture_dialect)
+    llm = MySQLLLMClient()
+    app = create_app(database_path=tmp_path / "mysql-chat.db", llm=llm)
+    client = TestClient(app)
+    source = client.post(
+        "/api/data-sources",
+        json={
+            "name": "local_mysql",
+            "db_type": "mysql",
+            "database_url": "mysql://datapilot_ro:datapilot123@localhost:3306/datapilot",
+            "allowed_tables": ["orders"],
+            "allowed_columns": {
+                "orders": ["id", "product_name", "amount", "status"],
+            },
+        },
+    ).json()
+
+    response = client.post(
+        "/api/chat",
+        json={"question": "最近 30 天销售额最高的 5 个商品是什么？", "data_source_id": source["id"]},
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["data"] == [{"product_name": "无线鼠标", "total_amount": 128.5}]
+    assert payload["answer"] == "MySQL 查询返回 1 行。"
+    assert payload["trusted_answer"] is False
+    assert payload["error"] is None
+    assert captured["dialect"] == "mysql"
+    assert "SQL 方言：mysql" in llm.prompts[0]

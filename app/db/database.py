@@ -11,6 +11,9 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
+from app.db.mysql import MySQLClient
+from app.db.postgres import PostgresClient
+
 
 ORDER_FIELD_DESCRIPTIONS = {
     "id": "订单 ID，主键",
@@ -148,6 +151,18 @@ class SQLiteDatabase:
 
         return "\n".join(lines)
 
+    def get_data_source_schema_description(self, source: dict[str, Any]) -> str:
+        if source["db_type"] == "sqlite":
+            return (
+                "SQL 方言：sqlite。\n"
+                + self.get_schema_description(source["allowed_tables"], source["allowed_columns"])
+            )
+        if source["db_type"] == "postgresql":
+            return self._get_postgres_schema_description(source)
+        if source["db_type"] == "mysql":
+            return self._get_mysql_schema_description(source)
+        return f"SQL 方言：{source['db_type']}。\n当前阶段不支持该数据源执行查询。"
+
     def list_tables(self) -> list[str]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -179,6 +194,24 @@ class SQLiteDatabase:
             finally:
                 if timeout_seconds is not None:
                     conn.set_progress_handler(None, 0)
+
+    def execute_data_source_select(
+        self,
+        source: dict[str, Any],
+        sql: str,
+        timeout_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
+        if source["db_type"] == "sqlite":
+            return self.execute_select(
+                sql,
+                database_url=source["database_url"],
+                timeout_seconds=timeout_seconds,
+            )
+        if source["db_type"] == "postgresql":
+            return PostgresClient(source["database_url"]).execute_select(sql, timeout_seconds)
+        if source["db_type"] == "mysql":
+            return MySQLClient(source["database_url"]).execute_select(sql, timeout_seconds)
+        raise ValueError("当前阶段仅支持 SQLite、PostgreSQL 和 MySQL 数据源执行查询")
 
     @contextmanager
     def _connect(self, path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
@@ -540,6 +573,14 @@ class SQLiteDatabase:
         tables = [table.strip().lower() for table in allowed_tables if table.strip()]
         if not tables:
             raise ValueError("allowed_tables 不能为空")
+        if db_type == "mysql" and (
+            not allowed_columns
+            or any(
+                not any(column.strip() for column in allowed_columns.get(table, []))
+                for table in tables
+            )
+        ):
+            raise ValueError("MySQL 数据源必须为每个白名单表显式配置 allowed_columns")
         columns = self._normalize_allowed_columns(tables, allowed_columns)
 
         with self._connect() as conn:
@@ -617,6 +658,17 @@ class SQLiteDatabase:
         if source is None:
             return {"ok": False, "message": "数据源不存在"}
 
+        if source["db_type"] == "postgresql":
+            return PostgresClient(source["database_url"]).test_connection(
+                source["allowed_tables"],
+                source["allowed_columns"],
+            )
+        if source["db_type"] == "mysql":
+            return MySQLClient(source["database_url"]).test_connection(
+                source["allowed_tables"],
+                source["allowed_columns"],
+            )
+
         if source["db_type"] != "sqlite":
             return {"ok": True, "message": "配置已保存，真实连接待后续接入驱动"}
 
@@ -643,6 +695,27 @@ class SQLiteDatabase:
             else self.get_default_data_source()
         )
         allowed_tables = set(source["allowed_tables"])
+        if source["db_type"] == "postgresql":
+            existing_tables = set(PostgresClient(source["database_url"]).list_tables())
+            return [
+                {
+                    "name": table,
+                    "description": TABLE_DESCRIPTIONS.get(table, ("", {}))[0],
+                    "queryable": table in allowed_tables,
+                }
+                for table in sorted(existing_tables & allowed_tables)
+            ]
+        if source["db_type"] == "mysql":
+            existing_tables = set(MySQLClient(source["database_url"]).list_tables())
+            return [
+                {
+                    "name": table,
+                    "description": TABLE_DESCRIPTIONS.get(table, ("", {}))[0],
+                    "queryable": table in allowed_tables,
+                }
+                for table in sorted(existing_tables & allowed_tables)
+            ]
+
         return [
             {
                 "name": table,
@@ -659,16 +732,41 @@ class SQLiteDatabase:
         data_source_id: int | None = None,
     ) -> list[dict[str, Any]]:
         table_name = table_name.lower()
-        if table_name not in TABLE_DESCRIPTIONS:
-            return []
 
         source = (
             self.get_data_source(data_source_id)
             if data_source_id is not None
             else self.get_default_data_source()
         )
+        if table_name not in source["allowed_tables"]:
+            return []
+        if source["db_type"] == "sqlite" and table_name not in TABLE_DESCRIPTIONS:
+            return []
         allowed = set(source["allowed_columns"].get(table_name, []))
-        _, field_descriptions = TABLE_DESCRIPTIONS[table_name]
+        _, field_descriptions = TABLE_DESCRIPTIONS.get(table_name, ("", {}))
+
+        if source["db_type"] == "postgresql":
+            rows = PostgresClient(source["database_url"]).list_columns(table_name)
+            return [
+                {
+                    "name": row["name"],
+                    "type": row["type"],
+                    "description": field_descriptions.get(row["name"], ""),
+                    "queryable": row["name"] in allowed,
+                }
+                for row in rows
+            ]
+        if source["db_type"] == "mysql":
+            rows = MySQLClient(source["database_url"]).list_columns(table_name)
+            return [
+                {
+                    "name": row["name"],
+                    "type": row["type"],
+                    "description": field_descriptions.get(row["name"], ""),
+                    "queryable": row["name"] in allowed,
+                }
+                for row in rows
+            ]
 
         with self._connect(source["database_url"]) as conn:
             rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
@@ -682,6 +780,56 @@ class SQLiteDatabase:
             }
             for row in rows
         ]
+
+    def _get_postgres_schema_description(self, source: dict[str, Any]) -> str:
+        selected_tables = set(source["allowed_tables"])
+        lines = ["SQL 方言：postgresql。"]
+        lines.append(f"当前允许查询的业务表：{'、'.join(sorted(selected_tables))}。")
+        if {"orders", "users"} <= selected_tables:
+            lines.append("表关系：orders.user_id = users.id。")
+        if {"orders", "products"} <= selected_tables:
+            lines.append("表关系：orders.product_id = products.id。")
+
+        for table in source["allowed_tables"]:
+            columns = self.list_catalog_columns(table, source["id"])
+            if not columns:
+                continue
+            table_comment = TABLE_DESCRIPTIONS.get(table, ("", {}))[0]
+            lines.append("")
+            lines.append(f"表：{table}（{table_comment}）")
+            lines.append("字段：")
+            for column in columns:
+                if not column["queryable"]:
+                    continue
+                lines.append(
+                    f"- {column['name']} ({column['type']})：{column['description']}"
+                )
+        return "\n".join(lines)
+
+    def _get_mysql_schema_description(self, source: dict[str, Any]) -> str:
+        selected_tables = set(source["allowed_tables"])
+        lines = ["SQL 方言：mysql。"]
+        lines.append(f"当前允许查询的业务表：{'、'.join(sorted(selected_tables))}。")
+        if {"orders", "users"} <= selected_tables:
+            lines.append("表关系：orders.user_id = users.id。")
+        if {"orders", "products"} <= selected_tables:
+            lines.append("表关系：orders.product_id = products.id。")
+
+        for table in source["allowed_tables"]:
+            columns = self.list_catalog_columns(table, source["id"])
+            if not columns:
+                continue
+            table_comment = TABLE_DESCRIPTIONS.get(table, ("", {}))[0]
+            lines.append("")
+            lines.append(f"表：{table}（{table_comment}）")
+            lines.append("字段：")
+            for column in columns:
+                if not column["queryable"]:
+                    continue
+                lines.append(
+                    f"- {column['name']} ({column['type']})：{column['description']}"
+                )
+        return "\n".join(lines)
 
     @staticmethod
     def _data_source_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -921,23 +1069,25 @@ class SQLiteDatabase:
         product_count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
         order_count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
 
-        if user_count == 0:
+        if user_count < 80:
             conn.executemany(
                 """
                 INSERT INTO users (id, name, city, level, registered_at)
                 VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
                 """,
                 self._build_seed_users(),
             )
-        if product_count == 0:
+        if product_count < 30:
             conn.executemany(
                 """
                 INSERT INTO products (id, product_name, category, brand, cost_price, list_price)
                 VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
                 """,
                 self._build_seed_products(),
             )
-        if order_count == 0:
+        if order_count < 1000:
             products = conn.execute(
                 "SELECT id, product_name, category, list_price FROM products ORDER BY id"
             ).fetchall()
@@ -949,17 +1099,18 @@ class SQLiteDatabase:
                     status, created_at, refund_amount
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
                 """,
                 self._build_seed_orders(products=products, users=users),
             )
 
     @staticmethod
     def _build_seed_users() -> list[tuple[Any, ...]]:
-        cities = ["北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京"]
+        cities = ["北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京", "苏州", "西安", "重庆", "长沙"]
         levels = ["普通", "银卡", "金卡", "黑金"]
         today = date.today()
         rows: list[tuple[Any, ...]] = []
-        for index in range(1, 25):
+        for index in range(1, 81):
             rows.append(
                 (
                     1000 + index,
@@ -984,6 +1135,26 @@ class SQLiteDatabase:
             (8, "跑步鞋", "服饰鞋包", "RunPeak", 260, 599),
             (9, "保温杯", "生活日用", "DailyUp", 45, 129),
             (10, "人体工学椅", "办公家具", "WorkWell", 880, 1599),
+            (11, "显示器", "数码配件", "ViewMax", 760, 1299),
+            (12, "移动硬盘", "数码配件", "DataBox", 320, 699),
+            (13, "扫地机器人", "家用电器", "HomePro", 1190, 2299),
+            (14, "净水器", "家用电器", "PureFlow", 980, 1899),
+            (15, "羽绒服", "服饰鞋包", "WarmGo", 520, 1099),
+            (16, "双肩包", "服饰鞋包", "UrbanPack", 150, 399),
+            (17, "洗发水", "美妆个护", "CarePlus", 38, 89),
+            (18, "护肤套装", "美妆个护", "GlowLab", 210, 499),
+            (19, "坚果礼盒", "食品饮料", "SnackFun", 90, 199),
+            (20, "咖啡豆", "食品饮料", "BeanLab", 78, 169),
+            (21, "婴儿推车", "母婴用品", "BabyJoy", 650, 1399),
+            (22, "儿童积木", "母婴用品", "KidStar", 80, 199),
+            (23, "瑜伽垫", "运动户外", "FitNow", 55, 129),
+            (24, "露营帐篷", "运动户外", "TrailGo", 430, 899),
+            (25, "商务笔记本", "图书文具", "PaperPro", 28, 69),
+            (26, "钢笔礼盒", "图书文具", "WriteWell", 120, 299),
+            (27, "升降桌", "办公家具", "WorkWell", 900, 1899),
+            (28, "文件柜", "办公家具", "OfficePro", 300, 799),
+            (29, "智能手表", "数码配件", "TechTime", 450, 999),
+            (30, "电动牙刷", "美妆个护", "CarePlus", 120, 299),
         ]
 
     @staticmethod
@@ -995,21 +1166,22 @@ class SQLiteDatabase:
         today = date.today()
         rows: list[tuple[Any, ...]] = []
 
-        for order_id in range(1, 181):
-            product = products[order_id % len(products)]
-            user = users[order_id % len(users)]
-            created_at = today - timedelta(days=order_id % 60)
+        for order_id in range(1, 1001):
+            product = products[(order_id * 7) % len(products)]
+            user = users[(order_id * 13) % len(users)]
+            created_at = today - timedelta(days=order_id % 120)
             status = "paid"
             refund_amount = 0.0
-            if order_id % 17 == 0:
-                status = "refunded"
-                refund_amount = float(product["list_price"])
-            elif order_id % 29 == 0:
+            if order_id % 31 == 0:
                 status = "cancelled"
+            elif order_id % 19 == 0:
+                status = "refunded"
 
-            amount = round(float(product["list_price"]) * random.uniform(0.85, 1.25), 2)
+            amount = round(float(product["list_price"]) * random.uniform(0.85, 1.35), 2)
             if status == "cancelled":
                 amount = 0.0
+            if status == "refunded":
+                refund_amount = amount
             rows.append(
                 (
                     order_id,

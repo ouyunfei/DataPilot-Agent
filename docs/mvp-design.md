@@ -18,6 +18,8 @@
 - 数据源级字段权限白名单
 - 数据目录接口
 - SQLite 查询执行
+- PostgreSQL 查询执行
+- MySQL 查询执行
 - 指标管理和语义层业务口径配置
 - 可信 SQL 命中
 - 查询日志
@@ -71,6 +73,7 @@
 - 为每个数据源维护独立表白名单
 - 为每个数据源维护独立字段白名单
 - 提供数据目录元数据：表名、字段名、字段类型、字段说明和可查询状态
+- 支持 PostgreSQL / MySQL 连接测试、schema 读取和 SELECT 查询执行
 - 保存 `metrics` 指标配置
 - 执行只读查询并返回字典列表
 
@@ -90,6 +93,7 @@
 - 只允许访问当前数据源配置的白名单字段
 - 自动追加或收敛 `LIMIT 100`
 - SQLite 查询执行超时保护，默认 `QUERY_TIMEOUT_SECONDS=5`
+- PostgreSQL / MySQL 查询执行超时保护
 
 ### 洞察层
 
@@ -136,7 +140,8 @@ START
 - `analyze_result` 统一负责最终中文回答，错误场景返回空回答
 - `run` 结束后写入查询日志，记录问题、SQL、命中情况、图表类型、行数、错误和耗时
 - `run` 会创建或复用 `session_id`，把最近会话上下文注入 schema prompt
-- `run` 会解析 `data_source_id`，把对应数据源的表白名单用于 schema 注入、SQL 校验和 SQLite 查询执行
+- `run` 会解析 `data_source_id`，把对应数据源的表和字段白名单用于 schema 注入、SQL 校验和查询执行
+- 当数据源为 PostgreSQL 或 MySQL 时，Agent 会动态读取对应数据库 schema，并使用相应 SQL 方言执行查询
 - `execute_sql` 查询成功后会生成 `insights`，`analyze_result` 会把洞察短句追加进最终回答
 
 ## 5. 语义层与可信答案
@@ -181,7 +186,9 @@ START
 | `is_default` | 是否默认数据源 |
 | `created_at` | 创建时间 |
 
-启动时自动初始化默认数据源 `default_sqlite`，白名单表为 `orders`、`users`、`products`。当前阶段 SQLite 会真实测试和执行；MySQL/PostgreSQL 先支持配置登记，真实连接留到下一阶段接入驱动。
+启动时自动初始化默认数据源 `default_sqlite`，白名单表为 `orders`、`users`、`products`。SQLite、PostgreSQL 和 MySQL 均支持真实连接测试、数据目录读取和只读查询；MySQL 数据源必须显式配置字段白名单。
+
+Docker 提供 MySQL 示例库，首次启动自动创建三张业务表并初始化 80 个用户、30 个商品和 1000 个订单。真实 MySQL 数据源不会自动建表或写入数据，推荐使用只有 `SELECT` 权限的账号。数据源接口返回连接地址时会隐藏密码。
 
 新增 `metrics` 指标配置表：
 
@@ -213,6 +220,8 @@ START
 - 没有 `LIMIT` 时自动追加 `LIMIT 100`
 - `LIMIT` 超过 100 时收敛为 100
 - SQLite 执行阶段有超时保护
+- PostgreSQL 执行阶段通过 `statement_timeout` 做超时保护
+- MySQL 执行阶段通过驱动超时和 `MAX_EXECUTION_TIME` 做超时保护
 - 校验失败时直接返回错误，不执行 SQL
 
 后续可以继续加入成本估算、行级权限和更细粒度的数据权限。
@@ -273,6 +282,7 @@ START
 - 查询统计接口体现运营监控和效果分析能力
 - 数据源管理和动态表白名单体现企业级数据治理能力
 - 数据目录、字段白名单和查询保护体现企业级安全治理能力
+- PostgreSQL / MySQL 真实数据源接入体现平台可连接真实数据库
 - 指标管理体现企业指标口径治理能力
 - 图表推荐为后续前端可视化预留接口
 - 异常 / 趋势发现让结果解释从“总结数据”升级为“发现问题”
@@ -283,9 +293,8 @@ START
 
 ## 11. 后续路线
 
-1. 接入真实 MySQL 和 PostgreSQL 驱动，支持按 `data_source_id` 切换执行引擎。
-2. 使用 Qdrant 存储字段口径、指标定义和业务知识。
-3. 使用 Redis 缓存 schema、热门查询和会话状态。
-4. 使用 Celery 支持异步长查询和定时报表。
-5. 拆分多智能体：Schema Agent、SQL Agent、SQL Review Agent、Insight Agent。
-6. 增加异常趋势发现、图表配置和更完整的统计看板接口。
+1. 使用 Qdrant 存储字段口径、指标定义和业务知识。
+2. 使用 Redis 缓存 schema、热门查询和会话状态。
+3. 使用 Celery 支持异步长查询和定时报表。
+4. 拆分多智能体：Schema Agent、SQL Agent、SQL Review Agent、Insight Agent。
+5. 增加异常趋势发现、图表配置和更完整的统计看板接口。

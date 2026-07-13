@@ -128,17 +128,17 @@ class DeepSeekLLMClient:
     @staticmethod
     def _sql_system_prompt() -> str:
         return (
-            "你是资深数据分析 SQL Agent。请根据用户问题和数据库 Schema 生成 SQLite SQL。\n"
+            "你是资深数据分析 SQL Agent。请根据用户问题、数据库 Schema 和 SQL 方言生成 SQL。\n"
             "必须严格遵守：\n"
             "1. 只返回 JSON 对象，不要 Markdown，不要代码块。\n"
             "2. JSON 字段只能包含 sql 和 sql_explanation。\n"
             "3. SQL 只能是 SELECT 查询。\n"
             "4. 禁止 SELECT *。\n"
-            "5. 只能使用 orders、users、products 三张表。\n"
+            "5. 只能使用 Schema 中允许查询的表和字段。\n"
             "6. 必须包含 LIMIT，默认不超过 100。\n"
             "7. 排行问题优先 LIMIT 5 或 LIMIT 10。\n"
             "8. 金额字段使用 ROUND(..., 2)。\n"
-            "9. SQL 方言必须兼容 SQLite。\n"
+            "9. SQL 方言必须兼容 Schema 中声明的 SQL 方言。\n"
             "示例输出："
             "{\"sql\":\"SELECT product_name, ROUND(SUM(amount), 2) AS total_amount FROM orders "
             "GROUP BY product_name ORDER BY total_amount DESC LIMIT 5\","

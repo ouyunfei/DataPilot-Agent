@@ -85,3 +85,16 @@ def test_validate_select_sql_uses_dynamic_allowed_columns():
         )
 
     assert "cost_price" in str(exc.value)
+
+
+def test_validate_select_sql_supports_mysql_dialect():
+    validated = validate_select_sql(
+        "SELECT DATE_FORMAT(created_at, '%Y-%m') AS order_month, SUM(amount) AS total_amount "
+        "FROM orders GROUP BY order_month",
+        allowed_tables={"orders"},
+        allowed_columns={"orders": {"created_at", "amount"}},
+        dialect="mysql",
+    )
+
+    assert "DATE_FORMAT" in validated
+    assert validated.endswith("LIMIT 100")

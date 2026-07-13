@@ -1,7 +1,8 @@
 from typing import Any
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 
 class ChatRequest(BaseModel):
@@ -119,6 +120,21 @@ class DataSourceItem(BaseModel):
     allowed_columns: dict[str, list[str]]
     is_default: bool
     created_at: str
+
+    @field_serializer("database_url")
+    def mask_database_password(self, database_url: str) -> str:
+        parsed = urlsplit(database_url)
+        if parsed.password is None:
+            return database_url
+
+        host = parsed.hostname or ""
+        if ":" in host:
+            host = f"[{host}]"
+        user = parsed.username or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        return urlunsplit(
+            (parsed.scheme, f"{user}:***@{host}{port}", parsed.path, parsed.query, parsed.fragment)
+        )
 
 
 class DataSourceListResponse(BaseModel):
