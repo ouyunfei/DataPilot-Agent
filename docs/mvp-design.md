@@ -22,6 +22,8 @@
 - MySQL 查询执行
 - 指标管理和语义层业务口径配置
 - 可信 SQL 命中
+- Qdrant Local 本地 RAG，按数据源隔离四类知识
+- Local RAG 不可用时 fail-open 回退原查询流程
 - 查询日志
 - 多轮追问会话上下文
 - 查询统计接口
@@ -42,6 +44,8 @@
 - 接收 `ChatRequest`
 - 调用 `DataAnalysisAgent`
 - 返回包含 `sql_explanation` 的 `ChatResponse`
+- 返回 `knowledge_sources`；无召回或降级时为空数组
+- 知识来源只暴露类型、来源 ID、标题和分数，不返回正文、向量、连接地址或密钥
 - 支持传入 `session_id` 进行多轮追问
 - 支持传入 `data_source_id` 指定数据源
 - 提供 `GET /api/data-sources`、`POST /api/data-sources`、`PUT /api/data-sources/{id}`、`DELETE /api/data-sources/{id}`、`POST /api/data-sources/{id}/test`
@@ -57,8 +61,28 @@
 
 - 使用 LangGraph `StateGraph` 编排节点
 - 定义 `AnalysisState`
-- 串联 schema、SQL、SQL 解释、校验、执行、分析等状态
+- 串联 schema、知识上下文、知识来源、SQL、SQL 解释、校验、执行、分析等状态
+- 在 `retrieve_schema` 后按当前 `data_source_id` 执行 `retrieve_knowledge`
+- 检索失败或无结果时写入空 `knowledge_context` 和空 `knowledge_sources`，不阻断问数
 - 在 SQL 不安全时跳过执行节点
+
+### Local RAG 知识层
+
+位置：`app/services/knowledge.py`、`scripts/rebuild_knowledge_index.py`
+
+职责：
+
+- 使用 `qdrant-client` Local Mode 持久化到 `data/qdrant/`
+- 使用本地 `BAAI/bge-small-zh-v1.5` 生成固定 512 维向量，Collection 使用 Cosine 距离
+- 构建 `schema`、`metric`、`trusted_sql`、`historical_qa` 四类知识
+- Schema 仅召回表/字段白名单允许的元数据
+- 指标必须启用，且表达式可归属到当前数据源允许的表和字段
+- 可信 SQL 仅来自 SQLite，并在入库前通过当前数据源白名单校验
+- 历史问答必须属于当前 `data_source_id`、执行成功、已点赞且问题、SQL、回答完整，并通过当前数据源表/字段白名单校验；旧的不完整日志跳过
+- 检索使用 Qdrant Payload Filter 强制限定 `data_source_id` 和 `queryable=true`
+- 重建脚本重建 Collection，并按四种知识类型输出数量
+
+Local Mode 同一目录不能由多个进程同时打开，重建前必须停止后端。当前 Docker Compose 不包含 Qdrant 服务；需要多实例或在线重建时迁移到 Qdrant Server/Cloud。
 
 ### 数据库层
 
@@ -122,18 +146,15 @@
 ## 4. LangGraph 工作流
 
 ```text
-START
-  -> retrieve_schema
-  -> generate_sql
-  -> validate_sql
-  -> execute_sql 或 analyze_result
-  -> analyze_result
-  -> END
+retrieve_schema -> retrieve_knowledge -> generate_sql -> validate_sql -> execute_sql -> analyze_result
 ```
 
 关键设计点：
 
+- `AnalysisState` 使用 `knowledge_context` 保存长度受限的参考知识，使用 `knowledge_sources` 保存 API 可返回的来源元数据
+- `retrieve_knowledge` 只检索知识，不执行 SQL；空结果不改变后续节点顺序
 - `generate_sql` 调用 DeepSeek，生成 SQL 和 SQL 解释
+- `generate_sql` 仅在有召回时把参考知识追加到 schema；参考内容明确不能覆盖安全规则
 - `validate_sql` 是执行数据库前的强制节点
 - 如果校验失败，状态中写入 `error`
 - 条件边根据 `error` 决定是否跳过 `execute_sql`
@@ -225,6 +246,9 @@ Docker 提供 MySQL 示例库，首次启动自动创建三张业务表并初始
 - PostgreSQL 执行阶段通过 `statement_timeout` 做超时保护
 - MySQL 执行阶段通过驱动超时和 `MAX_EXECUTION_TIME` 做超时保护
 - 校验失败时直接返回错误，不执行 SQL
+- 知识检索必须同时过滤当前 `data_source_id` 和 `queryable=true`，不能只依赖 Prompt 做隔离
+- 召回内容和可信 SQL 都只是参考，不能绕过 SQLGlot、表/字段白名单、只读、`LIMIT 100` 和执行超时保护
+- Qdrant 查询或本地模型异常时，日志只记录异常类型；目录、Collection、查询或模型不可用时，API 均不暴露内部错误、本地路径、知识正文、向量或连接密钥
 
 后续可以继续加入成本估算、行级权限和更细粒度的数据权限。
 
@@ -262,6 +286,12 @@ Docker 提供 MySQL 示例库，首次启动自动创建三张业务表并初始
 - 用户反馈分布
 - Top 5 高频问题
 
+### Local RAG 测试
+
+- `tests/test_knowledge.py` 使用 Fake Embedder 和临时 Qdrant Local 目录验证稳定 ID、幂等重建、四类知识、数据源隔离和 `queryable` 过滤
+- API 测试使用 Fake Retriever 验证 `retrieve_knowledge` 位于 SQL 生成之前、`knowledge_sources` 返回、空结果/异常降级和危险 SQL 仍被拦截
+- 测试不访问真实 DeepSeek、Hugging Face 或 Qdrant Server
+
 ## 9. 示例业务问题覆盖
 
 - 最近 30 天销售额最高的 5 个商品是什么？
@@ -295,8 +325,11 @@ Docker 提供 MySQL 示例库，首次启动自动创建三张业务表并初始
 
 ## 11. 后续路线
 
-1. 使用 Qdrant 存储字段口径、指标定义和业务知识。
-2. 使用 Redis 缓存 schema、热门查询和会话状态。
-3. 使用 Celery 支持异步长查询和定时报表。
-4. 拆分多智能体：Schema Agent、SQL Agent、SQL Review Agent、Insight Agent。
-5. 增加异常趋势发现、图表配置和更完整的统计看板接口。
+存储架构的详细演进方案见 `docs/storage-architecture-roadmap.md`。
+
+1. Local RAG 已使用 Qdrant Local 存储字段口径、指标定义、可信 SQL 和高质量历史问答；需要多实例时再迁移到 Qdrant Server/Cloud。
+2. 将 SQLite 中的平台配置、日志和会话迁移到 MySQL 元数据库。
+3. 删除 SQLite 默认运行依赖，将 PostgreSQL 调整为可选能力。
+4. 有明确性能数据后，再使用 Redis 缓存 Schema、热门查询和短期会话。
+5. 使用 Celery 支持异步长查询和定时报表。
+6. 拆分多智能体：Schema Agent、SQL Agent、SQL Review Agent、Insight Agent。

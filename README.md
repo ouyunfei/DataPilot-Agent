@@ -22,6 +22,8 @@
 - 指标管理：用 SQLite 配置销售额、退款率、客单价、毛利、订单数等业务口径
 - 语义层把启用指标动态注入给 Agent
 - 高频问题优先命中可信 SQL
+- Qdrant Local 本地 RAG：按 `data_source_id` 隔离 Schema、指标、可信 SQL 和高质量历史问答四类知识
+- 本地 `BAAI/bge-small-zh-v1.5` Embedding；知识库不可用或无召回时 fail-open 回退原查询流程
 - SQLite 记录查询日志，便于后续运营和优化
 - 查询日志列表和用户反馈接口
 - 多轮追问：返回并复用 `session_id`，把最近会话上下文注入 SQL 生成
@@ -54,6 +56,7 @@ DataPilot-Agent/
 │   ├── schemas/
 │   │   └── chat.py              # Pydantic 请求/响应模型
 │   ├── services/
+│   │   ├── knowledge.py         # Qdrant Local 知识构建、检索和本地 BGE Embedding
 │   │   ├── llm.py               # DeepSeek LLM 客户端
 │   │   ├── semantic.py          # 语义层上下文、可信答案和图表推荐
 │   │   ├── insights.py          # 异常 / 趋势洞察规则
@@ -65,7 +68,8 @@ DataPilot-Agent/
 ├── evals/
 │   └── questions.json          # Text-to-SQL 评测问题集
 ├── scripts/
-│   └── run_evals.py            # eval 执行脚本
+│   ├── rebuild_knowledge_index.py # 重建本地知识索引
+│   └── run_evals.py              # eval 执行脚本
 ├── tests/
 ├── .github/workflows/ci.yml
 ├── Dockerfile
@@ -79,12 +83,13 @@ DataPilot-Agent/
 ## 工作流设计
 
 ```text
-retrieve_schema -> generate_sql -> validate_sql -> execute_sql -> analyze_result
+retrieve_schema -> retrieve_knowledge -> generate_sql -> validate_sql -> execute_sql -> analyze_result
 ```
 
 节点职责：
 
 - `retrieve_schema`：读取三张表结构、字段说明、表关系和启用指标口径
+- `retrieve_knowledge`：按当前 `data_source_id` 召回可查询知识；失败或无结果时返回空上下文继续执行
 - `generate_sql`：调用 DeepSeek，根据用户问题和 schema 生成 SQL 与 SQL 解释
 - `validate_sql`：使用 SQLGlot 校验 SQL 安全性，并强制 `LIMIT`
 - `execute_sql`：执行已校验 SQL 并返回查询结果
@@ -167,6 +172,10 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_TIMEOUT_SECONDS=30
 QUERY_TIMEOUT_SECONDS=5
 POSTGRES_EXAMPLE_URL=postgresql://datapilot:datapilot123@127.0.0.1:5432/datapilot
+QDRANT_PATH=data/qdrant
+QDRANT_COLLECTION=datapilot_knowledge_bge_small_zh_v15
+EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+KNOWLEDGE_TOP_K=5
 ```
 
 启动服务：
@@ -179,6 +188,44 @@ uvicorn app.main:app --reload
 
 - 健康检查：http://127.0.0.1:8000/health
 - Swagger 文档：http://127.0.0.1:8000/docs
+
+## Local RAG
+
+依赖已经包含在 `requirements.txt`，安装方式仍是：
+
+```bash
+pip install -r requirements.txt
+```
+
+索引包含四类知识：
+
+- `schema`：数据源的表和字段元数据；不可查询项会标记 `queryable=false`，检索只召回白名单允许的元数据。
+- `metric`：启用且表达式能归属到当前数据源白名单表、字段的指标。
+- `trusted_sql`：通过当前 SQLite 数据源表、字段白名单校验的可信 SQL。
+- `historical_qa`：当前 `data_source_id` 下已点赞、执行成功且问题、SQL、回答完整，并通过当前数据源表/字段白名单校验的历史问答；旧日志缺少数据源或完整内容时跳过。
+
+配置：
+
+```env
+QDRANT_PATH=data/qdrant
+QDRANT_COLLECTION=datapilot_knowledge_bge_small_zh_v15
+EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+KNOWLEDGE_TOP_K=5
+```
+
+停止后端后重建索引：
+
+```bash
+python scripts/rebuild_knowledge_index.py
+```
+
+脚本重建 Collection，并输出 `schema`、`metric`、`trusted_sql`、`historical_qa` 和 `total` 数量。首次运行会从 Hugging Face 下载 `BAAI/bge-small-zh-v1.5`，后续使用本地缓存；模型固定生成 512 维向量，Qdrant 使用 Cosine 距离，不调用外部 Embedding API，也不支持运行时切换模型。不同模型必须使用不同 Collection 并重建索引。
+
+Qdrant Local 数据保存在 `data/qdrant/`，该目录已被 Git 忽略。需要清理时，先停止后端，再删除整个 `data/qdrant/` 目录并运行重建命令。Local Mode 的同一目录不能被多个进程同时打开，因此后端运行时不要重建；需要多实例或在线重建时迁移到 Qdrant Server/Cloud。本阶段 `docker-compose.yml` 不启动 Qdrant 服务。
+
+每次检索都使用 Qdrant Payload Filter 强制限定当前 `data_source_id` 和 `queryable=true`。召回内容只作为长度受限的参考上下文，不能覆盖 SQL 安全规则；所有 SQL 仍经过 SQLGlot、表/字段白名单、只读、`LIMIT 100` 和执行超时保护。
+
+知识目录或 Collection 不存在、Qdrant 查询失败、Embedding 模型加载失败、当前数据源无知识或检索结果为空时，系统自动使用空知识上下文继续原流程。客户端只看到空 `knowledge_sources`，不会收到内部异常类型、本地路径、知识正文、向量或连接密钥。
 
 ## Docker 启动
 
@@ -253,10 +300,26 @@ curl -X POST "http://127.0.0.1:8000/api/chat" ^
       "message": "Top 1 人体工学椅 比 Top 2 咖啡机 高 28.0%，头部差距明显。"
     }
   ],
+  "knowledge_sources": [
+    {
+      "knowledge_type": "metric",
+      "source_id": "1",
+      "title": "销售额",
+      "score": 0.87
+    }
+  ],
   "trusted_answer": true,
   "answer": "最近 30 天销售额最高的 Top 5 商品分别是人体工学椅、咖啡机、冲锋衣、空气炸锅和智能电饭煲，其中人体工学椅排名第一。Top 1 人体工学椅 比 Top 2 咖啡机 高 28.0%，头部差距明显。",
   "error": null,
   "error_code": null
+}
+```
+
+`knowledge_sources` 只返回 `knowledge_type`、`source_id`、`title` 和 `score`，不返回知识正文、向量、数据库地址或密钥。没有召回或 Local RAG 降级时返回：
+
+```json
+{
+  "knowledge_sources": []
 }
 ```
 
@@ -569,7 +632,7 @@ Content-Type: application/json
 }
 ```
 
-讲解链路：LangGraph 获取 schema 和语义层，SQLite 高频问题优先命中可信 SQL，经过 SQLGlot 安全校验后执行 SQLite、PostgreSQL 或 MySQL 查询，再生成中文 Top 5 总结、规则洞察和图表推荐。
+讲解链路：LangGraph 获取 schema 和语义层，按数据源召回 Local RAG 参考知识，SQLite 高频问题优先命中可信 SQL，经过 SQLGlot 安全校验后执行 SQLite、PostgreSQL 或 MySQL 查询，再生成中文 Top 5 总结、规则洞察和图表推荐。
 
 4. 演示危险 SQL 拦截：
 
@@ -610,7 +673,7 @@ python scripts/run_evals.py
 
 ## 后续扩展方向
 
-- 加入 Qdrant：存储业务指标解释、字段口径和历史查询样例，增强 schema 理解
+- Local RAG 需要多实例或在线重建时迁移到 Qdrant Server/Cloud
 - 加入 Redis：缓存 schema、热门查询结果和会话上下文
 - 加入 Celery：处理耗时查询、异步报表和定时分析任务
 - 多智能体拆分：Schema Agent、SQL Agent、SQL Review Agent、Insight Agent
