@@ -219,7 +219,7 @@ python scripts/rebuild_knowledge_index.py
 
 ## 9. API 返回
 
-现有 `POST /api/chat` 增加兼容性可选字段：
+现有 `POST /api/chat` 增加兼容字段 `knowledge_sources`，该字段在响应中始终存在：
 
 ```json
 {
@@ -236,7 +236,7 @@ python scripts/rebuild_knowledge_index.py
 
 要求：
 
-- 没有召回时返回空数组。
+- 没有召回或 RAG 降级时返回空数组。
 - 不删除或修改现有返回字段。
 - 不返回完整向量和不必要的完整知识正文。
 - 不返回数据库连接地址、密码或其他敏感配置。

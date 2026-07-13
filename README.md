@@ -64,6 +64,8 @@ DataPilot-Agent/
 │   └── main.py                  # FastAPI 应用入口
 ├── docs/
 │   ├── mvp-design.md
+│   ├── qdrant-local-rag-requirements.md
+│   ├── storage-architecture-roadmap.md
 │   └── superpowers/
 ├── evals/
 │   └── questions.json          # Text-to-SQL 评测问题集
@@ -220,6 +222,8 @@ python scripts/rebuild_knowledge_index.py
 ```
 
 脚本重建 Collection，并输出 `schema`、`metric`、`trusted_sql`、`historical_qa` 和 `total` 数量。首次运行会从 Hugging Face 下载 `BAAI/bge-small-zh-v1.5`，后续使用本地缓存；模型固定生成 512 维向量，Qdrant 使用 Cosine 距离，不调用外部 Embedding API，也不支持运行时切换模型。不同模型必须使用不同 Collection 并重建索引。
+
+Qdrant 索引是重建时快照，没有自动同步或后台任务。数据源表/字段白名单变化，指标创建、更新、删除或启停，或者查询反馈变化后，都要先停止后端，再运行 `python scripts/rebuild_knowledge_index.py`。重建前旧知识可能仍进入 Prompt，但生成的 SQL 仍不能绕过当前 SQL 校验器和表/字段白名单执行。
 
 Qdrant Local 数据保存在 `data/qdrant/`，该目录已被 Git 忽略。需要清理时，先停止后端，再删除整个 `data/qdrant/` 目录并运行重建命令。Local Mode 的同一目录不能被多个进程同时打开，因此后端运行时不要重建；需要多实例或在线重建时迁移到 Qdrant Server/Cloud。本阶段 `docker-compose.yml` 不启动 Qdrant 服务。
 

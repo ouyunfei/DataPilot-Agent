@@ -84,6 +84,8 @@
 
 Local Mode 同一目录不能由多个进程同时打开，重建前必须停止后端。当前 Docker Compose 不包含 Qdrant 服务；需要多实例或在线重建时迁移到 Qdrant Server/Cloud。
 
+Qdrant 索引是重建时快照，不存在自动同步或后台任务。数据源表/字段白名单变化，指标创建、更新、删除或启停，或者查询反馈变化后，必须停止后端并重新运行 `python scripts/rebuild_knowledge_index.py`。重建前旧知识可能仍进入 Prompt，但生成的 SQL 仍不能绕过当前 SQL 校验器和表/字段白名单执行。
+
 ### 数据库层
 
 位置：`app/db/database.py`
@@ -146,7 +148,9 @@ Local Mode 同一目录不能由多个进程同时打开，重建前必须停止
 ## 4. LangGraph 工作流
 
 ```text
-retrieve_schema -> retrieve_knowledge -> generate_sql -> validate_sql -> execute_sql -> analyze_result
+retrieve_schema -> retrieve_knowledge -> generate_sql -> validate_sql
+                                                        ├─ 成功 -> execute_sql -> analyze_result
+                                                        └─ 错误 -------------> analyze_result
 ```
 
 关键设计点：
