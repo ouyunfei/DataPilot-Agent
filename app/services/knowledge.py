@@ -2,13 +2,21 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+import hashlib
 import math
 from pathlib import Path
+import re
 from threading import Lock
 from typing import Any, Protocol
 import uuid
 
 from qdrant_client import QdrantClient, models
+import sqlglot
+from sqlglot import exp
+
+from app.db.database import SQLiteDatabase
+from app.services.semantic import TRUSTED_ANSWERS, build_semantic_context
+from app.services.sql_validator import SQLSafetyError, validate_select_sql
 
 
 EMBEDDING_MODEL_NAME = "BAAI/bge-small-zh-v1.5"
@@ -60,6 +68,161 @@ class KnowledgeDocument:
             "content": self.content,
             "queryable": self.queryable,
         }
+
+
+def collect_knowledge_documents(db: SQLiteDatabase) -> list[KnowledgeDocument]:
+    documents: list[KnowledgeDocument] = []
+    metrics = db.list_metrics(enabled_only=True)
+
+    for source in db.list_data_sources():
+        source_id = source["id"]
+        for table in db.list_catalog_tables(
+            source_id, include_non_queryable=True
+        ):
+            table_id = f"table:{table['name']}"
+            documents.append(
+                KnowledgeDocument(
+                    data_source_id=source_id,
+                    knowledge_type="schema",
+                    source_id=table_id,
+                    title=f"表 {table['name']}",
+                    content=(
+                        f"标识：{table_id}\n"
+                        "类型：表\n"
+                        f"描述：{table['description']}\n"
+                        f"可查询：{'是' if table['queryable'] else '否'}"
+                    ),
+                    queryable=table["queryable"],
+                )
+            )
+            for column in db.list_catalog_columns(
+                table["name"], source_id, include_non_queryable=True
+            ):
+                column_id = f"column:{table['name']}.{column['name']}"
+                documents.append(
+                    KnowledgeDocument(
+                        data_source_id=source_id,
+                        knowledge_type="schema",
+                        source_id=column_id,
+                        title=f"字段 {table['name']}.{column['name']}",
+                        content=(
+                            f"标识：{column_id}\n"
+                            f"类型：{column['type']}\n"
+                            f"描述：{column['description']}\n"
+                            f"可查询：{'是' if column['queryable'] else '否'}"
+                        ),
+                        queryable=column["queryable"],
+                    )
+                )
+
+        for metric in metrics:
+            context = build_semantic_context(
+                [metric], source["allowed_tables"], source["allowed_columns"]
+            )
+            if f"- {metric['name']}：" not in context:
+                continue
+            references = sorted(
+                {
+                    f"{match.group(1).lower()}.{match.group(2).lower()}"
+                    for match in re.finditer(
+                        r"\b([A-Za-z_][\w]*)\.([A-Za-z_][\w]*)\b",
+                        metric["expression"],
+                    )
+                }
+            )
+            documents.append(
+                KnowledgeDocument(
+                    data_source_id=source_id,
+                    knowledge_type="metric",
+                    source_id=str(metric["id"]),
+                    title=metric["name"],
+                    content=(
+                        f"指标：{metric['name']}\n"
+                        f"描述：{metric['description']}\n"
+                        f"表达式：{metric['expression']}\n"
+                        f"引用字段：{'、'.join(references) or '无'}"
+                    ),
+                )
+            )
+
+        documents.extend(_trusted_sql_documents(source))
+        documents.extend(_historical_qa_documents(db, source_id))
+
+    return documents
+
+
+def _trusted_sql_documents(source: dict[str, Any]) -> list[KnowledgeDocument]:
+    if source["db_type"] != "sqlite":
+        return []
+
+    documents = []
+    allowed_tables = set(source["allowed_tables"])
+    allowed_columns = {
+        table: set(columns) for table, columns in source["allowed_columns"].items()
+    }
+    for question, answer in TRUSTED_ANSWERS.items():
+        try:
+            sql = validate_select_sql(
+                answer["sql"],
+                allowed_tables=allowed_tables,
+                allowed_columns=allowed_columns,
+                dialect="sqlite",
+            )
+        except SQLSafetyError:
+            continue
+
+        expression = sqlglot.parse_one(sql, read="sqlite")
+        tables = sorted(
+            {table.name.lower() for table in expression.find_all(exp.Table)}
+        )
+        aliases = {
+            projection.alias.lower()
+            for projection in expression.expressions
+            if projection.alias
+        }
+        columns = sorted(
+            {
+                column.name.lower()
+                for column in expression.find_all(exp.Column)
+                if column.table or column.name.lower() not in aliases
+            }
+        )
+        documents.append(
+            KnowledgeDocument(
+                data_source_id=source["id"],
+                knowledge_type="trusted_sql",
+                source_id=hashlib.sha256(question.encode()).hexdigest()[:16],
+                title=question,
+                content=(
+                    f"问题：{question}\n"
+                    f"SQL：{sql}\n"
+                    f"解释：{answer['sql_explanation']}\n"
+                    f"引用表：{'、'.join(tables) or '无'}\n"
+                    f"引用字段：{'、'.join(columns) or '无'}"
+                ),
+            )
+        )
+    return documents
+
+
+def _historical_qa_documents(
+    db: SQLiteDatabase, source_id: int
+) -> list[KnowledgeDocument]:
+    return [
+        KnowledgeDocument(
+            data_source_id=source_id,
+            knowledge_type="historical_qa",
+            source_id=str(item["id"]),
+            title=item["question"],
+            content=(
+                f"问题：{item['question']}\n"
+                f"SQL：{item['sql']}\n"
+                f"解释：{item['sql_explanation']}\n"
+                f"回答：{item['answer']}"
+            ),
+        )
+        for item in db.list_high_quality_historical_qa(source_id)
+    ]
 
 
 class BGEEmbedder:

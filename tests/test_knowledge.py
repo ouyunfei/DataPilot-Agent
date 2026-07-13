@@ -1,9 +1,13 @@
+import hashlib
+import importlib
 import sys
 from types import ModuleType
 
 import pytest
 from qdrant_client import QdrantClient
 
+from app.db.database import SQLiteDatabase
+import app.services.knowledge as knowledge_module
 from app.services.knowledge import (
     BGEEmbedder,
     EMBEDDING_DIMENSION,
@@ -404,3 +408,261 @@ def test_retrieve_returns_empty_context_and_sources_without_hits(tmp_path):
     )
 
     assert knowledge.retrieve("销售额", data_source_id=1) == ("", [])
+
+
+def test_collects_all_four_knowledge_types_without_database_secrets(tmp_path):
+    db = SQLiteDatabase(tmp_path / "knowledge.db")
+    db.initialize()
+    source_id = db.get_default_data_source()["id"]
+    db.log_query(
+        question="销售额是多少？",
+        sql="SELECT SUM(amount) FROM orders",
+        trusted_answer=False,
+        chart_type="",
+        row_count=1,
+        error=None,
+        duration_ms=10,
+        data_source_id=source_id,
+        sql_explanation="汇总订单金额。",
+        answer="销售额为 100 万元。",
+    )
+    log_id = db.list_query_logs()[0]["id"]
+    db.update_query_feedback(log_id, feedback="like")
+
+    documents = knowledge_module.collect_knowledge_documents(db)
+
+    assert {document.knowledge_type for document in documents} == {
+        "schema",
+        "metric",
+        "trusted_sql",
+        "historical_qa",
+    }
+    assert all(document.data_source_id == source_id for document in documents)
+    historical = next(
+        document
+        for document in documents
+        if document.knowledge_type == "historical_qa"
+    )
+    assert historical.source_id == str(log_id)
+    assert historical.content == (
+        "问题：销售额是多少？\n"
+        "SQL：SELECT SUM(amount) FROM orders\n"
+        "解释：汇总订单金额。\n"
+        "回答：销售额为 100 万元。"
+    )
+    for document in documents:
+        assert str(db.path) not in document.content
+        assert str(db.path) not in repr(document.payload)
+        assert "database_url" not in document.payload
+
+
+def test_collects_queryability_for_all_sqlite_schema_objects(tmp_path):
+    database_path = tmp_path / "knowledge.db"
+    db = SQLiteDatabase(database_path)
+    db.initialize()
+    source = db.create_data_source(
+        name="orders_only",
+        db_type="sqlite",
+        database_url=str(database_path),
+        allowed_tables=["orders"],
+        allowed_columns={"orders": ["id", "amount"]},
+    )
+
+    documents = {
+        document.source_id: document
+        for document in knowledge_module.collect_knowledge_documents(db)
+        if document.data_source_id == source["id"]
+        and document.knowledge_type == "schema"
+    }
+
+    assert documents["table:products"].queryable is False
+    assert documents["column:orders.amount"].queryable is True
+    assert documents["column:orders.status"].queryable is False
+    assert "标识：table:products" in documents["table:products"].content
+    assert "可查询：否" in documents["table:products"].content
+    assert "可查询：是" in documents["column:orders.amount"].content
+
+
+def test_trusted_sql_requires_sqlite_and_current_whitelist(
+    tmp_path, monkeypatch
+):
+    database_path = tmp_path / "knowledge.db"
+    db = SQLiteDatabase(database_path)
+    db.initialize()
+    source = db.get_default_data_source()
+    db.update_data_source(
+        source["id"],
+        allowed_tables=["orders"],
+        allowed_columns={"orders": ["id", "amount"]},
+    )
+    mysql_source = db.create_data_source(
+        name="mysql",
+        db_type="mysql",
+        database_url="mysql://user:secret@localhost:3306/datapilot",
+        allowed_tables=["orders"],
+        allowed_columns={"orders": ["id", "amount"]},
+    )
+    monkeypatch.setattr(
+        knowledge_module,
+        "TRUSTED_ANSWERS",
+        {
+            "有效问题": {
+                "sql": "SELECT amount FROM orders",
+                "sql_explanation": "读取订单金额。",
+            },
+            "越权字段": {
+                "sql": "SELECT status FROM orders",
+                "sql_explanation": "读取订单状态。",
+            },
+            "越权表": {
+                "sql": "SELECT id FROM products",
+                "sql_explanation": "读取商品。",
+            },
+        },
+    )
+    original_list_catalog_tables = db.list_catalog_tables
+
+    def list_catalog_tables(data_source_id=None, include_non_queryable=False):
+        if data_source_id == mysql_source["id"]:
+            return []
+        return original_list_catalog_tables(data_source_id, include_non_queryable)
+
+    monkeypatch.setattr(db, "list_catalog_tables", list_catalog_tables)
+    metric_calls = 0
+    original_list_metrics = db.list_metrics
+
+    def list_metrics(enabled_only=False):
+        nonlocal metric_calls
+        metric_calls += 1
+        return original_list_metrics(enabled_only)
+
+    monkeypatch.setattr(db, "list_metrics", list_metrics)
+
+    documents = knowledge_module.collect_knowledge_documents(db)
+    trusted = [
+        document
+        for document in documents
+        if document.knowledge_type == "trusted_sql"
+    ]
+
+    assert metric_calls == 1
+    assert all(
+        "mysql://user:secret@localhost:3306/datapilot" not in repr(document.payload)
+        for document in documents
+    )
+    assert [(document.data_source_id, document.source_id) for document in trusted] == [
+        (
+            source["id"],
+            hashlib.sha256("有效问题".encode()).hexdigest()[:16],
+        )
+    ]
+    assert "SELECT amount FROM orders LIMIT 100" in trusted[0].content
+    assert "引用表：orders" in trusted[0].content
+    assert "引用字段：amount" in trusted[0].content
+
+
+def test_trusted_sql_field_references_exclude_projection_aliases(tmp_path):
+    db = SQLiteDatabase(tmp_path / "knowledge.db")
+    db.initialize()
+
+    trusted = next(
+        document
+        for document in knowledge_module.collect_knowledge_documents(db)
+        if document.knowledge_type == "trusted_sql"
+        and document.title == "最近30天销售额最高的5个商品是什么"
+    )
+
+    assert trusted.content.splitlines()[-1] == (
+        "引用字段：amount、created_at、product_name、status"
+    )
+
+
+def test_rebuild_script_collects_before_replacing_index(monkeypatch, capsys):
+    rebuild = importlib.import_module("scripts.rebuild_knowledge_index")
+    events = []
+    documents = [_document(1, "sales", "销售额指标定义")]
+
+    class FakeDatabase:
+        def __init__(self, path):
+            events.append(("database", path))
+
+        def initialize(self):
+            events.append("initialize")
+
+    class FakeBGEEmbedder:
+        def __init__(self, model_name):
+            events.append(("embedder", model_name))
+
+    class FakeKnowledgeBase:
+        def __init__(self, path, collection_name, embedder, top_k):
+            events.append(("knowledge", path, collection_name, embedder, top_k))
+
+        def rebuild(self, received_documents):
+            assert received_documents == documents
+            events.append("rebuild")
+            return {"metric": 1}
+
+    def collect(db):
+        assert isinstance(db, FakeDatabase)
+        events.append("collect")
+        return documents
+
+    monkeypatch.setattr(rebuild, "SQLiteDatabase", FakeDatabase)
+    monkeypatch.setattr(rebuild, "BGEEmbedder", FakeBGEEmbedder)
+    monkeypatch.setattr(rebuild, "QdrantKnowledgeBase", FakeKnowledgeBase)
+    monkeypatch.setattr(rebuild, "collect_knowledge_documents", collect)
+    monkeypatch.setattr(rebuild, "EMBEDDING_MODEL", rebuild.EMBEDDING_MODEL_NAME)
+
+    assert rebuild.main() == 0
+
+    stdout, stderr = capsys.readouterr()
+    assert stderr == ""
+    assert stdout.splitlines() == [
+        "schema: 0",
+        "metric: 1",
+        "trusted_sql: 0",
+        "historical_qa: 0",
+        "total: 1",
+    ]
+    assert events[0][0] == "database"
+    assert events[1:3] == ["initialize", "collect"]
+    assert events[-1] == "rebuild"
+
+
+def test_rebuild_script_hides_exception_details(monkeypatch, capsys):
+    rebuild = importlib.import_module("scripts.rebuild_knowledge_index")
+
+    class FailingDatabase:
+        def __init__(self, _path):
+            pass
+
+        def initialize(self):
+            raise RuntimeError("mysql://user:password@host/private.db")
+
+    monkeypatch.setattr(rebuild, "SQLiteDatabase", FailingDatabase)
+    monkeypatch.setattr(rebuild, "EMBEDDING_MODEL", rebuild.EMBEDDING_MODEL_NAME)
+
+    assert rebuild.main() == 1
+
+    stdout, stderr = capsys.readouterr()
+    assert stdout == ""
+    assert stderr == "索引重建失败：RuntimeError\n"
+
+
+def test_rebuild_script_rejects_other_embedding_model_without_loading(
+    monkeypatch, capsys
+):
+    rebuild = importlib.import_module("scripts.rebuild_knowledge_index")
+
+    class UnexpectedDatabase:
+        def __init__(self, _path):
+            raise AssertionError("database must not load")
+
+    monkeypatch.setattr(rebuild, "SQLiteDatabase", UnexpectedDatabase)
+    monkeypatch.setattr(rebuild, "EMBEDDING_MODEL", "other/model")
+
+    assert rebuild.main() == 1
+
+    stdout, stderr = capsys.readouterr()
+    assert stdout == ""
+    assert stderr == "索引重建失败：Embedding 模型配置错误\n"
