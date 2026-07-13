@@ -467,6 +467,87 @@ def test_mysql_data_source_test_uses_real_checker_and_masks_password(tmp_path, m
     assert test_response.json() == {"ok": True, "message": "MySQL 数据源连接正常"}
 
 
+def test_data_source_can_be_updated_and_password_stays_masked(tmp_path):
+    app = create_app(database_path=tmp_path / "update-source.db", llm=FakeLLMClient())
+    client = TestClient(app)
+    source = client.post(
+        "/api/data-sources",
+        json={
+            "name": "mysql_update",
+            "db_type": "mysql",
+            "database_url": "mysql://user:old_secret@localhost:3306/datapilot",
+            "allowed_tables": ["orders"],
+            "allowed_columns": {"orders": ["id", "amount"]},
+        },
+    ).json()
+
+    response = client.put(
+        f"/api/data-sources/{source['id']}",
+        json={
+            "database_url": "mysql://user:new_secret@db.internal:3306/business",
+            "allowed_tables": ["products"],
+            "allowed_columns": {"products": ["id", "product_name"]},
+        },
+    )
+    listed = client.get("/api/data-sources").json()["items"]
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["database_url"] == "mysql://user:***@db.internal:3306/business"
+    assert updated["allowed_tables"] == ["products"]
+    assert updated["allowed_columns"] == {"products": ["id", "product_name"]}
+    assert next(item for item in listed if item["id"] == source["id"])["database_url"] == updated["database_url"]
+
+
+def test_data_source_can_be_set_default_and_default_cannot_be_deleted(tmp_path):
+    database_path = tmp_path / "default-source.db"
+    app = create_app(database_path=database_path, llm=FakeLLMClient())
+    client = TestClient(app)
+    source = client.post(
+        "/api/data-sources",
+        json={
+            "name": "new_default",
+            "db_type": "sqlite",
+            "database_url": str(database_path),
+            "allowed_tables": ["orders"],
+        },
+    ).json()
+
+    updated = client.put(f"/api/data-sources/{source['id']}", json={"is_default": True})
+    delete_response = client.delete(f"/api/data-sources/{source['id']}")
+    listed = client.get("/api/data-sources").json()["items"]
+
+    assert updated.status_code == 200
+    assert updated.json()["is_default"] is True
+    assert sum(item["is_default"] for item in listed) == 1
+    assert delete_response.status_code == 400
+    assert "默认数据源" in delete_response.json()["detail"]
+
+
+def test_non_default_data_source_can_be_deleted_and_missing_source_returns_404(tmp_path):
+    database_path = tmp_path / "delete-source.db"
+    app = create_app(database_path=database_path, llm=FakeLLMClient())
+    client = TestClient(app)
+    source = client.post(
+        "/api/data-sources",
+        json={
+            "name": "temporary_source",
+            "db_type": "sqlite",
+            "database_url": str(database_path),
+            "allowed_tables": ["orders"],
+        },
+    ).json()
+
+    deleted = client.delete(f"/api/data-sources/{source['id']}")
+    deleted_again = client.delete(f"/api/data-sources/{source['id']}")
+    missing_update = client.put("/api/data-sources/999999", json={"is_default": True})
+
+    assert deleted.status_code == 200
+    assert deleted.json() == {"ok": True}
+    assert deleted_again.status_code == 404
+    assert missing_update.status_code == 404
+
+
 def test_chat_uses_data_source_table_whitelist(tmp_path):
     llm = UsersTableLLMClient()
     database_path = tmp_path / "table-whitelist.db"

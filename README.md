@@ -352,6 +352,22 @@ curl -X POST "http://127.0.0.1:8000/api/data-sources" ^
 curl -X POST "http://127.0.0.1:8000/api/data-sources/1/test"
 ```
 
+更新连接地址、白名单或默认状态：
+
+```bash
+curl -X PUT "http://127.0.0.1:8000/api/data-sources/2" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"allowed_tables\":[\"orders\"],\"allowed_columns\":{\"orders\":[\"id\",\"amount\",\"created_at\"]},\"is_default\":true}"
+```
+
+删除非默认数据源：
+
+```bash
+curl -X DELETE "http://127.0.0.1:8000/api/data-sources/2"
+```
+
+当前默认数据源不能直接取消默认状态或删除，需要先把其他数据源设置为默认。更新响应和列表响应会继续隐藏连接密码，脱敏后的 `***` 地址不能作为更新值提交。
+
 SQLite、PostgreSQL 和 MySQL 数据源都会真实检查白名单表和字段，并支持 `/api/chat` 只读查询。MySQL 数据源必须显式提供每张白名单表的 `allowed_columns`。
 
 本地 Docker PostgreSQL 示例库连接串：

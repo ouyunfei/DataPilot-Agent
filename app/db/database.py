@@ -609,6 +609,103 @@ class SQLiteDatabase:
             raise ValueError("数据源创建失败")
         return source
 
+    def update_data_source(
+        self,
+        source_id: int,
+        database_url: str | None = None,
+        allowed_tables: list[str] | None = None,
+        allowed_columns: dict[str, list[str]] | None = None,
+        is_default: bool | None = None,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    id, name, db_type, database_url, allowed_tables,
+                    allowed_columns, is_default, created_at
+                FROM data_sources
+                WHERE id = ?
+                """,
+                (source_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = self._data_source_from_row(row)
+
+            next_database_url = (
+                database_url if database_url is not None else current["database_url"]
+            )
+            if not next_database_url.strip():
+                raise ValueError("database_url 不能为空")
+            if ":***@" in next_database_url:
+                raise ValueError("请提供包含真实密码的完整连接地址，不能提交脱敏后的 database_url")
+
+            tables = (
+                [table.strip().lower() for table in allowed_tables if table.strip()]
+                if allowed_tables is not None
+                else current["allowed_tables"]
+            )
+            if not tables:
+                raise ValueError("allowed_tables 不能为空")
+
+            columns_input = current["allowed_columns"]
+            if allowed_columns is not None:
+                columns_input = {**columns_input, **allowed_columns}
+            if current["db_type"] == "mysql" and (
+                not columns_input
+                or any(
+                    not any(column.strip() for column in columns_input.get(table, []))
+                    for table in tables
+                )
+            ):
+                raise ValueError("MySQL 数据源必须为每个白名单表显式配置 allowed_columns")
+            columns = self._normalize_allowed_columns(tables, columns_input)
+
+            if current["is_default"] and is_default is False:
+                raise ValueError("默认数据源不能取消默认状态，请先设置其他默认数据源")
+            next_is_default = current["is_default"] if is_default is None else is_default
+
+            if is_default is True and not current["is_default"]:
+                conn.execute("UPDATE data_sources SET is_default = 0")
+            conn.execute(
+                """
+                UPDATE data_sources
+                SET database_url = ?, allowed_tables = ?, allowed_columns = ?, is_default = ?
+                WHERE id = ?
+                """,
+                (
+                    next_database_url,
+                    json.dumps(tables, ensure_ascii=False),
+                    json.dumps(columns, ensure_ascii=False),
+                    int(next_is_default),
+                    source_id,
+                ),
+            )
+            updated = conn.execute(
+                """
+                SELECT
+                    id, name, db_type, database_url, allowed_tables,
+                    allowed_columns, is_default, created_at
+                FROM data_sources
+                WHERE id = ?
+                """,
+                (source_id,),
+            ).fetchone()
+            return self._data_source_from_row(updated)
+
+    def delete_data_source(self, source_id: int) -> bool:
+        with self._connect() as conn:
+            source = conn.execute(
+                "SELECT is_default FROM data_sources WHERE id = ?",
+                (source_id,),
+            ).fetchone()
+            if source is None:
+                return False
+            if source["is_default"]:
+                raise ValueError("默认数据源不能删除，请先设置其他默认数据源")
+            cursor = conn.execute("DELETE FROM data_sources WHERE id = ?", (source_id,))
+            return cursor.rowcount > 0
+
     def list_data_sources(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(

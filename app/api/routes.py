@@ -11,6 +11,7 @@ from app.schemas.chat import (
     DataSourceItem,
     DataSourceListResponse,
     DataSourceTestResponse,
+    DataSourceUpdateRequest,
     FeedbackResponse,
     MetricCreateRequest,
     MetricItem,
@@ -67,6 +68,35 @@ def create_chat_router(agent: DataAnalysisAgent) -> APIRouter:
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return DataSourceItem(**source)
+
+    @router.put("/data-sources/{source_id}", response_model=DataSourceItem)
+    def update_data_source(
+        source_id: int,
+        request: DataSourceUpdateRequest,
+    ) -> DataSourceItem:
+        try:
+            source = agent.db.update_data_source(
+                source_id=source_id,
+                database_url=request.database_url,
+                allowed_tables=request.allowed_tables,
+                allowed_columns=request.allowed_columns,
+                is_default=request.is_default,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if source is None:
+            raise HTTPException(status_code=404, detail="data source not found")
+        return DataSourceItem(**source)
+
+    @router.delete("/data-sources/{source_id}", response_model=FeedbackResponse)
+    def delete_data_source(source_id: int) -> FeedbackResponse:
+        try:
+            deleted = agent.db.delete_data_source(source_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="data source not found")
+        return FeedbackResponse(ok=True)
 
     @router.post("/data-sources/{source_id}/test", response_model=DataSourceTestResponse)
     def test_data_source(source_id: int) -> DataSourceTestResponse:

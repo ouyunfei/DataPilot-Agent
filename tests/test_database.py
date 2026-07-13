@@ -208,6 +208,94 @@ def test_database_creates_data_source_with_column_whitelist_and_catalog(tmp_path
     assert next(column for column in columns if column["name"] == "cost_price")["queryable"] is False
 
 
+def test_database_updates_data_source_and_switches_default(tmp_path):
+    database_path = tmp_path / "orders.db"
+    db = SQLiteDatabase(database_path)
+    db.initialize()
+    original_default = db.get_default_data_source()
+    source = db.create_data_source(
+        name="products_source",
+        db_type="sqlite",
+        database_url=str(database_path),
+        allowed_tables=["orders"],
+    )
+
+    updated = db.update_data_source(
+        source["id"],
+        database_url=str(tmp_path / "updated.db"),
+        allowed_tables=["products"],
+        allowed_columns={"products": ["id", "product_name"]},
+        is_default=True,
+    )
+
+    assert updated is not None
+    assert updated["database_url"] == str(tmp_path / "updated.db")
+    assert updated["allowed_tables"] == ["products"]
+    assert updated["allowed_columns"] == {"products": ["id", "product_name"]}
+    assert updated["is_default"] is True
+    assert db.get_data_source(original_default["id"])["is_default"] is False
+    assert db.get_default_data_source()["id"] == source["id"]
+
+
+def test_database_rejects_unsetting_or_deleting_default_data_source(tmp_path):
+    db = SQLiteDatabase(tmp_path / "orders.db")
+    db.initialize()
+    default_source = db.get_default_data_source()
+
+    with pytest.raises(ValueError, match="默认数据源"):
+        db.update_data_source(default_source["id"], is_default=False)
+
+    with pytest.raises(ValueError, match="默认数据源"):
+        db.delete_data_source(default_source["id"])
+
+    assert db.get_data_source(default_source["id"]) is not None
+
+
+def test_database_deletes_non_default_source_and_rejects_masked_password(tmp_path):
+    db = SQLiteDatabase(tmp_path / "orders.db")
+    db.initialize()
+    source = db.create_data_source(
+        name="mysql_source",
+        db_type="mysql",
+        database_url="mysql://user:secret@localhost:3306/datapilot",
+        allowed_tables=["orders"],
+        allowed_columns={"orders": ["id", "amount"]},
+    )
+
+    with pytest.raises(ValueError, match="完整连接地址"):
+        db.update_data_source(
+            source["id"],
+            database_url="mysql://user:***@localhost:3306/datapilot",
+        )
+
+    assert db.delete_data_source(source["id"]) is True
+    assert db.get_data_source(source["id"]) is None
+    assert db.delete_data_source(source["id"]) is False
+
+
+def test_database_update_preserves_unspecified_column_whitelists(tmp_path):
+    database_path = tmp_path / "orders.db"
+    db = SQLiteDatabase(database_path)
+    db.initialize()
+    source = db.create_data_source(
+        name="partial_columns",
+        db_type="sqlite",
+        database_url=str(database_path),
+        allowed_tables=["orders", "products"],
+        allowed_columns={"orders": ["id"], "products": ["id"]},
+    )
+
+    updated = db.update_data_source(
+        source["id"],
+        allowed_columns={"orders": ["id", "amount"]},
+    )
+
+    assert updated["allowed_columns"] == {
+        "orders": ["id", "amount"],
+        "products": ["id"],
+    }
+
+
 def test_database_execute_select_can_timeout(tmp_path):
     db = SQLiteDatabase(tmp_path / "orders.db")
     db.initialize()

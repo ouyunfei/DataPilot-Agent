@@ -111,6 +111,13 @@ class DataSourceCreateRequest(BaseModel):
     is_default: bool = False
 
 
+class DataSourceUpdateRequest(BaseModel):
+    database_url: str | None = Field(default=None, min_length=1, max_length=1000)
+    allowed_tables: list[str] | None = Field(default=None, min_length=1)
+    allowed_columns: dict[str, list[str]] | None = None
+    is_default: bool | None = None
+
+
 class DataSourceItem(BaseModel):
     id: int
     name: str

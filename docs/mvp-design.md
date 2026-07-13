@@ -44,7 +44,7 @@
 - 返回包含 `sql_explanation` 的 `ChatResponse`
 - 支持传入 `session_id` 进行多轮追问
 - 支持传入 `data_source_id` 指定数据源
-- 提供 `GET /api/data-sources`、`POST /api/data-sources`、`POST /api/data-sources/{id}/test`
+- 提供 `GET /api/data-sources`、`POST /api/data-sources`、`PUT /api/data-sources/{id}`、`DELETE /api/data-sources/{id}`、`POST /api/data-sources/{id}/test`
 - 提供 `GET /api/catalog/tables`、`GET /api/catalog/tables/{table_name}/columns`
 - 提供 `GET /api/metrics`、`POST /api/metrics`、`PUT /api/metrics/{id}`、`DELETE /api/metrics/{id}`
 - 提供 `GET /api/query-stats` 查询运营统计指标
@@ -189,6 +189,8 @@ START
 启动时自动初始化默认数据源 `default_sqlite`，白名单表为 `orders`、`users`、`products`。SQLite、PostgreSQL 和 MySQL 均支持真实连接测试、数据目录读取和只读查询；MySQL 数据源必须显式配置字段白名单。
 
 Docker 提供 MySQL 示例库，首次启动自动创建三张业务表并初始化 80 个用户、30 个商品和 1000 个订单。真实 MySQL 数据源不会自动建表或写入数据，推荐使用只有 `SELECT` 权限的账号。数据源接口返回连接地址时会隐藏密码。
+
+数据源支持更新连接地址、表/字段白名单和默认状态，并允许删除非默认数据源。默认数据源的切换在同一事务中完成；当前默认数据源不能直接取消默认状态或删除，避免系统失去可用的默认数据源。
 
 新增 `metrics` 指标配置表：
 
