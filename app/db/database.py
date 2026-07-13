@@ -301,6 +301,9 @@ class SQLiteDatabase:
                 feedback TEXT,
                 feedback_note TEXT,
                 duration_ms INTEGER NOT NULL,
+                data_source_id INTEGER,
+                sql_explanation TEXT NOT NULL DEFAULT '',
+                answer TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -314,6 +317,14 @@ class SQLiteDatabase:
             conn.execute("ALTER TABLE query_logs ADD COLUMN feedback_note TEXT")
         if "error_code" not in existing_columns:
             conn.execute("ALTER TABLE query_logs ADD COLUMN error_code TEXT")
+        if "data_source_id" not in existing_columns:
+            conn.execute("ALTER TABLE query_logs ADD COLUMN data_source_id INTEGER")
+        if "sql_explanation" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE query_logs ADD COLUMN sql_explanation TEXT NOT NULL DEFAULT ''"
+            )
+        if "answer" not in existing_columns:
+            conn.execute("ALTER TABLE query_logs ADD COLUMN answer TEXT NOT NULL DEFAULT ''")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -988,15 +999,19 @@ class SQLiteDatabase:
         error: str | None,
         duration_ms: int,
         error_code: str | None = None,
+        data_source_id: int | None = None,
+        sql_explanation: str = "",
+        answer: str = "",
     ) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO query_logs (
                     question, sql, trusted_answer, chart_type, row_count,
-                    error, error_code, duration_ms
+                    error, error_code, duration_ms, data_source_id,
+                    sql_explanation, answer
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     question,
@@ -1007,6 +1022,9 @@ class SQLiteDatabase:
                     error,
                     error_code,
                     duration_ms,
+                    data_source_id,
+                    sql_explanation,
+                    answer,
                 ),
             )
 
@@ -1037,6 +1055,26 @@ class SQLiteDatabase:
                 (feedback, note, log_id),
             )
             return cursor.rowcount > 0
+
+    def list_high_quality_historical_qa(
+        self, data_source_id: int
+    ) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, question, sql, sql_explanation, answer, data_source_id
+                FROM query_logs
+                WHERE data_source_id = ?
+                  AND error IS NULL
+                  AND feedback = 'like'
+                  AND TRIM(question) != ''
+                  AND TRIM(sql) != ''
+                  AND TRIM(answer) != ''
+                ORDER BY id ASC
+                """,
+                (data_source_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def create_session(self, session_id: str | None = None) -> str:
         session_id = session_id or str(uuid.uuid4())

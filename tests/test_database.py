@@ -90,6 +90,89 @@ def test_database_lists_query_logs_and_updates_feedback(tmp_path):
     assert row["feedback_note"] == "口径需要确认"
 
 
+def test_database_lists_only_successful_liked_historical_qa(tmp_path):
+    db = SQLiteDatabase(tmp_path / "orders.db")
+    db.initialize()
+    source_id = db.get_default_data_source()["id"]
+
+    db.log_query(
+        question="最近 30 天销售额是多少？",
+        sql="SELECT SUM(amount) FROM orders",
+        trusted_answer=False,
+        chart_type="",
+        row_count=1,
+        error=None,
+        duration_ms=10,
+        data_source_id=source_id,
+        sql_explanation="汇总最近 30 天订单金额。",
+        answer="最近 30 天销售额为 100 万元。",
+    )
+    liked_log_id = db.list_query_logs()[0]["id"]
+    db.update_query_feedback(liked_log_id, feedback="like")
+
+    db.log_query(
+        question="失败的问题",
+        sql="SELECT missing FROM orders",
+        trusted_answer=False,
+        chart_type="",
+        row_count=0,
+        error="字段不存在",
+        duration_ms=10,
+        data_source_id=source_id,
+        sql_explanation="查询不存在的字段。",
+        answer="查询失败。",
+    )
+    failed_log_id = db.list_query_logs()[0]["id"]
+    db.update_query_feedback(failed_log_id, feedback="like")
+
+    db.log_query(
+        question="未点赞的问题",
+        sql="SELECT COUNT(*) FROM orders",
+        trusted_answer=False,
+        chart_type="",
+        row_count=1,
+        error=None,
+        duration_ms=10,
+        data_source_id=source_id,
+        sql_explanation="统计订单数。",
+        answer="共有 1000 笔订单。",
+    )
+
+    assert db.list_high_quality_historical_qa(source_id) == [
+        {
+            "id": liked_log_id,
+            "question": "最近 30 天销售额是多少？",
+            "sql": "SELECT SUM(amount) FROM orders",
+            "sql_explanation": "汇总最近 30 天订单金额。",
+            "answer": "最近 30 天销售额为 100 万元。",
+            "data_source_id": source_id,
+        }
+    ]
+
+
+def test_database_skips_liked_historical_qa_with_empty_answer(tmp_path):
+    db = SQLiteDatabase(tmp_path / "orders.db")
+    db.initialize()
+    source_id = db.get_default_data_source()["id"]
+
+    db.log_query(
+        question="最近 30 天销售额是多少？",
+        sql="SELECT SUM(amount) FROM orders",
+        trusted_answer=False,
+        chart_type="",
+        row_count=1,
+        error=None,
+        duration_ms=10,
+        data_source_id=source_id,
+        sql_explanation="汇总最近 30 天订单金额。",
+        answer="",
+    )
+    log_id = db.list_query_logs()[0]["id"]
+    db.update_query_feedback(log_id, feedback="like")
+
+    assert db.list_high_quality_historical_qa(source_id) == []
+
+
 def test_database_saves_session_messages_and_returns_context(tmp_path):
     db = SQLiteDatabase(tmp_path / "orders.db")
     db.initialize()
