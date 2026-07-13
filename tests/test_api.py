@@ -40,11 +40,14 @@ class FakeLLMClient:
 
 
 class FakeKnowledgeRetriever:
-    def __init__(self) -> None:
+    def __init__(self, error: Exception | None = None) -> None:
         self.calls: list[tuple[str, int]] = []
+        self.error = error
 
     def retrieve(self, question: str, data_source_id: int):
         self.calls.append((question, data_source_id))
+        if self.error is not None:
+            raise self.error
         return (
             "以下内容是参考知识：销售额只统计已支付订单。",
             [
@@ -203,7 +206,8 @@ class FakeMySQLClient(FakePostgresClient):
 
 
 def test_chat_returns_sql_data_and_chinese_answer(tmp_path):
-    app = create_app(database_path=tmp_path / "chat.db", llm=FakeLLMClient())
+    database_path = tmp_path / "chat.db"
+    app = create_app(database_path=database_path, llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
 
     response = client.post("/api/chat", json={"question": "请按商品统计销售额排名"})
@@ -221,6 +225,24 @@ def test_chat_returns_sql_data_and_chinese_answer(tmp_path):
     assert payload["insights"][0]["message"] in payload["answer"]
     assert payload["error"] is None
     assert payload["session_id"]
+
+    from app.db.database import SQLiteDatabase
+
+    logs = SQLiteDatabase(database_path).execute_select(
+        """
+        SELECT data_source_id, sql_explanation, answer
+        FROM query_logs
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    )
+    assert logs == [
+        {
+            "data_source_id": payload["data_source_id"],
+            "sql_explanation": payload["sql_explanation"],
+            "answer": payload["answer"],
+        }
+    ]
 
 
 def test_chat_retrieves_knowledge_before_sql_generation_and_returns_sources(tmp_path):
@@ -250,8 +272,44 @@ def test_chat_retrieves_knowledge_before_sql_generation_and_returns_sources(tmp_
     assert retriever.calls == [(question, payload["data_source_id"])]
 
 
+def test_chat_continues_without_leaking_failing_retriever_details(tmp_path):
+    secret = r"C:\private\qdrant\password-secret"
+    retriever = FakeKnowledgeRetriever(RuntimeError(secret))
+    app = create_app(
+        database_path=tmp_path / "failing-knowledge.db",
+        llm=FakeLLMClient(),
+        knowledge=retriever,
+    )
+    client = TestClient(app)
+
+    response = client.post("/api/chat", json={"question": "请按商品统计销售额排名"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["data"]
+    assert payload["knowledge_sources"] == []
+    assert payload["error"] is None
+    assert secret not in response.text
+    assert "password-secret" not in response.text
+
+
+def test_create_app_explicit_none_disables_default_knowledge(tmp_path, monkeypatch):
+    def unexpected_default_knowledge(**_kwargs):
+        raise AssertionError("default knowledge must stay disabled")
+
+    monkeypatch.setattr("app.main.QdrantKnowledgeBase", unexpected_default_knowledge)
+
+    app = create_app(
+        database_path=tmp_path / "disabled-knowledge.db",
+        llm=FakeLLMClient(),
+        knowledge=None,
+    )
+
+    assert TestClient(app).get("/health").status_code == 200
+
+
 def test_chat_returns_error_when_generated_sql_is_unsafe(tmp_path):
-    app = create_app(database_path=tmp_path / "unsafe.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "unsafe.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
 
     response = client.post("/api/chat", json={"question": "请删除所有订单数据"})
@@ -266,7 +324,7 @@ def test_chat_returns_error_when_generated_sql_is_unsafe(tmp_path):
 
 
 def test_chat_returns_error_when_llm_fails(tmp_path):
-    app = create_app(database_path=tmp_path / "llm-error.db", llm=FailingLLMClient())
+    app = create_app(database_path=tmp_path / "llm-error.db", llm=FailingLLMClient(), knowledge=None)
     client = TestClient(app)
 
     response = client.post("/api/chat", json={"question": "请分析商品销售额排名"})
@@ -280,7 +338,7 @@ def test_chat_returns_error_when_llm_fails(tmp_path):
 
 def test_chat_uses_trusted_answer_and_writes_query_log(tmp_path):
     database_path = tmp_path / "trusted.db"
-    app = create_app(database_path=database_path, llm=AnalyzeOnlyLLMClient())
+    app = create_app(database_path=database_path, llm=AnalyzeOnlyLLMClient(), knowledge=None)
     client = TestClient(app)
 
     response = client.post("/api/chat", json={"question": "最近 30 天销售额最高的 5 个商品是什么？"})
@@ -314,7 +372,7 @@ def test_chat_uses_trusted_answer_and_writes_query_log(tmp_path):
 
 def test_query_logs_can_be_listed_and_feedback_can_be_saved(tmp_path):
     database_path = tmp_path / "logs.db"
-    app = create_app(database_path=database_path, llm=AnalyzeOnlyLLMClient())
+    app = create_app(database_path=database_path, llm=AnalyzeOnlyLLMClient(), knowledge=None)
     client = TestClient(app)
 
     client.post("/api/chat", json={"question": "最近 30 天销售额最高的 5 个商品是什么？"})
@@ -339,7 +397,7 @@ def test_query_logs_can_be_listed_and_feedback_can_be_saved(tmp_path):
 
 
 def test_query_log_feedback_returns_404_for_missing_log(tmp_path):
-    app = create_app(database_path=tmp_path / "missing-log.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "missing-log.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
 
     response = client.post(
@@ -352,7 +410,7 @@ def test_query_log_feedback_returns_404_for_missing_log(tmp_path):
 
 def test_health_returns_database_and_deepseek_status_without_api_key(tmp_path, monkeypatch):
     monkeypatch.setattr("app.main.DEEPSEEK_API_KEY", "sk-secret-value")
-    app = create_app(database_path=tmp_path / "health.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "health.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
 
     response = client.get("/health")
@@ -368,7 +426,7 @@ def test_health_returns_database_and_deepseek_status_without_api_key(tmp_path, m
 
 def test_health_treats_placeholder_deepseek_key_as_not_configured(tmp_path, monkeypatch):
     monkeypatch.setattr("app.main.DEEPSEEK_API_KEY", "your_deepseek_api_key")
-    app = create_app(database_path=tmp_path / "placeholder-health.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "placeholder-health.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
 
     response = client.get("/health")
@@ -379,7 +437,7 @@ def test_health_treats_placeholder_deepseek_key_as_not_configured(tmp_path, monk
 
 def test_app_can_start_without_deepseek_key(tmp_path, monkeypatch):
     monkeypatch.setattr("app.main.DEEPSEEK_API_KEY", "")
-    app = create_app(database_path=tmp_path / "no-key.db")
+    app = create_app(database_path=tmp_path / "no-key.db", knowledge=None)
     client = TestClient(app)
 
     health = client.get("/health")
@@ -392,7 +450,7 @@ def test_app_can_start_without_deepseek_key(tmp_path, monkeypatch):
 
 
 def test_security_policies_endpoint_returns_current_sql_rules(tmp_path):
-    app = create_app(database_path=tmp_path / "security.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "security.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
 
     response = client.get("/api/security/policies")
@@ -407,7 +465,7 @@ def test_security_policies_endpoint_returns_current_sql_rules(tmp_path):
 
 def test_data_sources_can_be_created_listed_and_tested(tmp_path):
     database_path = tmp_path / "data-sources.db"
-    app = create_app(database_path=database_path, llm=FakeLLMClient())
+    app = create_app(database_path=database_path, llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
 
     default_sources = client.get("/api/data-sources").json()["items"]
@@ -437,7 +495,7 @@ def test_data_sources_can_be_created_listed_and_tested(tmp_path):
 
 def test_postgresql_data_source_test_uses_real_checker(tmp_path, monkeypatch):
     monkeypatch.setattr("app.db.database.PostgresClient", FakePostgresClient, raising=False)
-    app = create_app(database_path=tmp_path / "postgres-config.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "postgres-config.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
 
     created = client.post(
@@ -458,7 +516,7 @@ def test_postgresql_data_source_test_uses_real_checker(tmp_path, monkeypatch):
 
 
 def test_mysql_data_source_requires_explicit_column_whitelist(tmp_path):
-    app = create_app(database_path=tmp_path / "mysql-config.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "mysql-config.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
 
     response = client.post(
@@ -491,7 +549,7 @@ def test_mysql_data_source_requires_explicit_column_whitelist(tmp_path):
 
 def test_mysql_data_source_test_uses_real_checker_and_masks_password(tmp_path, monkeypatch):
     monkeypatch.setattr("app.db.database.MySQLClient", FakeMySQLClient, raising=False)
-    app = create_app(database_path=tmp_path / "mysql-source.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "mysql-source.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
 
     created = client.post(
@@ -514,7 +572,7 @@ def test_mysql_data_source_test_uses_real_checker_and_masks_password(tmp_path, m
 
 
 def test_data_source_can_be_updated_and_password_stays_masked(tmp_path):
-    app = create_app(database_path=tmp_path / "update-source.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "update-source.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
     source = client.post(
         "/api/data-sources",
@@ -547,7 +605,7 @@ def test_data_source_can_be_updated_and_password_stays_masked(tmp_path):
 
 def test_data_source_can_be_set_default_and_default_cannot_be_deleted(tmp_path):
     database_path = tmp_path / "default-source.db"
-    app = create_app(database_path=database_path, llm=FakeLLMClient())
+    app = create_app(database_path=database_path, llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
     source = client.post(
         "/api/data-sources",
@@ -572,7 +630,7 @@ def test_data_source_can_be_set_default_and_default_cannot_be_deleted(tmp_path):
 
 def test_non_default_data_source_can_be_deleted_and_missing_source_returns_404(tmp_path):
     database_path = tmp_path / "delete-source.db"
-    app = create_app(database_path=database_path, llm=FakeLLMClient())
+    app = create_app(database_path=database_path, llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
     source = client.post(
         "/api/data-sources",
@@ -597,7 +655,7 @@ def test_non_default_data_source_can_be_deleted_and_missing_source_returns_404(t
 def test_chat_uses_data_source_table_whitelist(tmp_path):
     llm = UsersTableLLMClient()
     database_path = tmp_path / "table-whitelist.db"
-    app = create_app(database_path=database_path, llm=llm)
+    app = create_app(database_path=database_path, llm=llm, knowledge=None)
     client = TestClient(app)
     source = client.post(
         "/api/data-sources",
@@ -627,7 +685,7 @@ def test_chat_uses_data_source_table_whitelist(tmp_path):
 
 def test_security_policies_can_use_data_source_whitelist(tmp_path):
     database_path = tmp_path / "policy-source.db"
-    app = create_app(database_path=database_path, llm=FakeLLMClient())
+    app = create_app(database_path=database_path, llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
     source = client.post(
         "/api/data-sources",
@@ -647,7 +705,7 @@ def test_security_policies_can_use_data_source_whitelist(tmp_path):
 
 def test_chat_reuses_session_and_injects_recent_context(tmp_path):
     llm = FakeLLMClient()
-    app = create_app(database_path=tmp_path / "session.db", llm=llm)
+    app = create_app(database_path=tmp_path / "session.db", llm=llm, knowledge=None)
     client = TestClient(app)
 
     first = client.post("/api/chat", json={"question": "请按商品统计销售额排名"}).json()
@@ -663,7 +721,7 @@ def test_chat_reuses_session_and_injects_recent_context(tmp_path):
 
 
 def test_query_stats_returns_operational_metrics(tmp_path):
-    app = create_app(database_path=tmp_path / "stats.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "stats.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
 
     client.post("/api/chat", json={"question": "请按商品统计销售额排名"})
@@ -683,7 +741,7 @@ def test_query_stats_returns_operational_metrics(tmp_path):
 
 
 def test_metrics_can_be_created_listed_updated_and_deleted(tmp_path):
-    app = create_app(database_path=tmp_path / "metrics.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "metrics.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
 
     list_response = client.get("/api/metrics")
@@ -716,7 +774,7 @@ def test_metrics_can_be_created_listed_updated_and_deleted(tmp_path):
 
 def test_chat_injects_configured_metrics_into_prompt(tmp_path):
     llm = FakeLLMClient()
-    app = create_app(database_path=tmp_path / "metric-prompt.db", llm=llm)
+    app = create_app(database_path=tmp_path / "metric-prompt.db", llm=llm, knowledge=None)
     client = TestClient(app)
 
     client.post(
@@ -736,7 +794,7 @@ def test_chat_injects_configured_metrics_into_prompt(tmp_path):
 
 def test_catalog_endpoints_return_table_and_column_permissions(tmp_path):
     database_path = tmp_path / "catalog.db"
-    app = create_app(database_path=database_path, llm=FakeLLMClient())
+    app = create_app(database_path=database_path, llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
     source = client.post(
         "/api/data-sources",
@@ -762,7 +820,7 @@ def test_catalog_endpoints_return_table_and_column_permissions(tmp_path):
 def test_chat_blocks_non_whitelisted_columns_and_hides_them_from_prompt(tmp_path):
     llm = ProductCostLLMClient()
     database_path = tmp_path / "column-whitelist.db"
-    app = create_app(database_path=database_path, llm=llm)
+    app = create_app(database_path=database_path, llm=llm, knowledge=None)
     client = TestClient(app)
     source = client.post(
         "/api/data-sources",
@@ -792,7 +850,7 @@ def test_chat_blocks_non_whitelisted_columns_and_hides_them_from_prompt(tmp_path
 
 def test_postgresql_catalog_uses_postgres_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr("app.db.database.PostgresClient", FakePostgresClient, raising=False)
-    app = create_app(database_path=tmp_path / "pg-catalog.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "pg-catalog.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
     source = client.post(
         "/api/data-sources",
@@ -824,7 +882,7 @@ def test_postgresql_catalog_uses_postgres_metadata(tmp_path, monkeypatch):
 
 def test_mysql_catalog_uses_mysql_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr("app.db.database.MySQLClient", FakeMySQLClient, raising=False)
-    app = create_app(database_path=tmp_path / "mysql-catalog.db", llm=FakeLLMClient())
+    app = create_app(database_path=tmp_path / "mysql-catalog.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)
     source = client.post(
         "/api/data-sources",
@@ -853,7 +911,7 @@ def test_mysql_catalog_uses_mysql_metadata(tmp_path, monkeypatch):
 def test_chat_executes_postgresql_data_source(tmp_path, monkeypatch):
     monkeypatch.setattr("app.db.database.PostgresClient", FakePostgresClient, raising=False)
     llm = PostgresLLMClient()
-    app = create_app(database_path=tmp_path / "pg-chat.db", llm=llm)
+    app = create_app(database_path=tmp_path / "pg-chat.db", llm=llm, knowledge=None)
     client = TestClient(app)
     source = client.post(
         "/api/data-sources",
@@ -893,7 +951,7 @@ def test_chat_executes_mysql_data_source_with_mysql_dialect(tmp_path, monkeypatc
 
     monkeypatch.setattr("app.agent.workflow.validate_select_sql", capture_dialect)
     llm = MySQLLLMClient()
-    app = create_app(database_path=tmp_path / "mysql-chat.db", llm=llm)
+    app = create_app(database_path=tmp_path / "mysql-chat.db", llm=llm, knowledge=None)
     client = TestClient(app)
     source = client.post(
         "/api/data-sources",

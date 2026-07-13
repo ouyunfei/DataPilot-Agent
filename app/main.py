@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import cast
 
 from fastapi import FastAPI
 
@@ -21,10 +22,13 @@ from app.services.knowledge import BGEEmbedder, QdrantKnowledgeBase
 from app.services.llm import BaseLLMClient, DeepSeekLLMClient, UnavailableLLMClient
 
 
+_AUTO = object()
+
+
 def create_app(
     database_path: str | Path | None = None,
     llm: BaseLLMClient | None = None,
-    knowledge: KnowledgeRetriever | None = None,
+    knowledge: KnowledgeRetriever | None | object = _AUTO,
 ) -> FastAPI:
     db = SQLiteDatabase(database_path or DEFAULT_DATABASE_PATH)
     db.initialize()
@@ -41,17 +45,19 @@ def create_app(
     else:
         llm_client = UnavailableLLMClient("缺少 DEEPSEEK_API_KEY，请在 .env 或环境变量中配置。")
 
-    if knowledge is None:
+    if knowledge is _AUTO:
         try:
-            knowledge = QdrantKnowledgeBase(
+            knowledge_client: KnowledgeRetriever | None = QdrantKnowledgeBase(
                 path=QDRANT_PATH,
                 collection_name=QDRANT_COLLECTION,
                 embedder=BGEEmbedder(EMBEDDING_MODEL),
                 top_k=KNOWLEDGE_TOP_K,
             )
         except ValueError:
-            knowledge = None
-    agent = DataAnalysisAgent(db=db, llm=llm_client, knowledge=knowledge)
+            knowledge_client = None
+    else:
+        knowledge_client = cast(KnowledgeRetriever | None, knowledge)
+    agent = DataAnalysisAgent(db=db, llm=llm_client, knowledge=knowledge_client)
 
     app = FastAPI(
         title="DataPilot Agent",
