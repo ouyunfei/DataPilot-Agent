@@ -291,6 +291,33 @@ def test_database_creates_data_source_with_column_whitelist_and_catalog(tmp_path
     assert next(column for column in columns if column["name"] == "cost_price")["queryable"] is False
 
 
+def test_database_catalog_can_include_non_queryable_schema(tmp_path):
+    database_path = tmp_path / "orders.db"
+    db = SQLiteDatabase(database_path)
+    db.initialize()
+    source = db.create_data_source(
+        name="orders_public",
+        db_type="sqlite",
+        database_url=str(database_path),
+        allowed_tables=["orders"],
+        allowed_columns={"orders": ["id", "amount"]},
+    )
+
+    public_tables = db.list_catalog_tables(source["id"])
+    all_tables = db.list_catalog_tables(source["id"], include_non_queryable=True)
+    product_columns = db.list_catalog_columns(
+        "products",
+        source["id"],
+        include_non_queryable=True,
+    )
+
+    assert [table["name"] for table in public_tables] == ["orders"]
+    assert next(table for table in all_tables if table["name"] == "orders")["queryable"] is True
+    assert next(table for table in all_tables if table["name"] == "products")["queryable"] is False
+    assert product_columns
+    assert all(column["queryable"] is False for column in product_columns)
+
+
 def test_database_updates_data_source_and_switches_default(tmp_path):
     database_path = tmp_path / "orders.db"
     db = SQLiteDatabase(database_path)

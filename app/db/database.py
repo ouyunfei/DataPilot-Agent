@@ -796,7 +796,11 @@ class SQLiteDatabase:
             return {"ok": False, "message": f"白名单表不存在：{'、'.join(sorted(missing))}"}
         return {"ok": True, "message": "SQLite 数据源连接正常"}
 
-    def list_catalog_tables(self, data_source_id: int | None = None) -> list[dict[str, Any]]:
+    def list_catalog_tables(
+        self,
+        data_source_id: int | None = None,
+        include_non_queryable: bool = False,
+    ) -> list[dict[str, Any]]:
         source = (
             self.get_data_source(data_source_id)
             if data_source_id is not None
@@ -805,23 +809,25 @@ class SQLiteDatabase:
         allowed_tables = set(source["allowed_tables"])
         if source["db_type"] == "postgresql":
             existing_tables = set(PostgresClient(source["database_url"]).list_tables())
+            selected_tables = existing_tables if include_non_queryable else existing_tables & allowed_tables
             return [
                 {
                     "name": table,
                     "description": TABLE_DESCRIPTIONS.get(table, ("", {}))[0],
                     "queryable": table in allowed_tables,
                 }
-                for table in sorted(existing_tables & allowed_tables)
+                for table in sorted(selected_tables)
             ]
         if source["db_type"] == "mysql":
             existing_tables = set(MySQLClient(source["database_url"]).list_tables())
+            selected_tables = existing_tables if include_non_queryable else existing_tables & allowed_tables
             return [
                 {
                     "name": table,
                     "description": TABLE_DESCRIPTIONS.get(table, ("", {}))[0],
                     "queryable": table in allowed_tables,
                 }
-                for table in sorted(existing_tables & allowed_tables)
+                for table in sorted(selected_tables)
             ]
 
         return [
@@ -831,13 +837,14 @@ class SQLiteDatabase:
                 "queryable": table in allowed_tables,
             }
             for table, (description, _) in TABLE_DESCRIPTIONS.items()
-            if table in allowed_tables
+            if include_non_queryable or table in allowed_tables
         ]
 
     def list_catalog_columns(
         self,
         table_name: str,
         data_source_id: int | None = None,
+        include_non_queryable: bool = False,
     ) -> list[dict[str, Any]]:
         table_name = table_name.lower()
 
@@ -846,11 +853,12 @@ class SQLiteDatabase:
             if data_source_id is not None
             else self.get_default_data_source()
         )
-        if table_name not in source["allowed_tables"]:
+        table_queryable = table_name in source["allowed_tables"]
+        if not table_queryable and not include_non_queryable:
             return []
         if source["db_type"] == "sqlite" and table_name not in TABLE_DESCRIPTIONS:
             return []
-        allowed = set(source["allowed_columns"].get(table_name, []))
+        allowed = set(source["allowed_columns"].get(table_name, [])) if table_queryable else set()
         _, field_descriptions = TABLE_DESCRIPTIONS.get(table_name, ("", {}))
 
         if source["db_type"] == "postgresql":
