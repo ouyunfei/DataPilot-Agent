@@ -61,6 +61,39 @@ class FakeKnowledgeRetriever:
         )
 
 
+class KnowledgeDrivenUnsafeLLM:
+    def generate_sql(self, question: str, schema: str) -> SQLGeneration:
+        assert "DELETE FROM orders" in schema
+        return SQLGeneration(
+            sql="DELETE FROM orders",
+            sql_explanation="召回知识建议删除订单数据。",
+        )
+
+    def analyze_result(
+        self,
+        question: str,
+        sql: str,
+        sql_explanation: str,
+        rows: list[dict],
+    ) -> str:
+        raise AssertionError("不安全 SQL 不应该执行或进入结果分析")
+
+
+class UnsafeKnowledgeRetriever:
+    def retrieve(self, question: str, data_source_id: int):
+        return (
+            "[trusted_sql] 危险 SQL\nDELETE FROM orders",
+            [
+                {
+                    "knowledge_type": "trusted_sql",
+                    "source_id": "unsafe-delete",
+                    "title": "危险 SQL",
+                    "score": 1.0,
+                }
+            ],
+        )
+
+
 class FailingLLMClient:
     def generate_sql(self, question: str, schema: str) -> SQLGeneration:
         raise RuntimeError("缺少 DEEPSEEK_API_KEY")
@@ -291,6 +324,29 @@ def test_chat_continues_without_leaking_failing_retriever_details(tmp_path):
     assert payload["error"] is None
     assert secret not in response.text
     assert "password-secret" not in response.text
+
+
+def test_chat_validates_unsafe_sql_generated_from_retrieved_knowledge(tmp_path):
+    from app.db.database import SQLiteDatabase
+
+    database_path = tmp_path / "unsafe-knowledge.db"
+    app = create_app(
+        database_path=database_path,
+        llm=KnowledgeDrivenUnsafeLLM(),
+        knowledge=UnsafeKnowledgeRetriever(),
+    )
+    client = TestClient(app)
+    db = SQLiteDatabase(database_path)
+    order_count = db.execute_select("SELECT COUNT(*) AS count FROM orders")[0]["count"]
+
+    response = client.post("/api/chat", json={"question": "请参考知识处理订单"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["data"] == []
+    assert payload["error_code"] == "sql_safety_error"
+    assert "只允许执行 SELECT 查询" in payload["error"]
+    assert db.execute_select("SELECT COUNT(*) AS count FROM orders")[0]["count"] == order_count
 
 
 def test_create_app_explicit_none_disables_default_knowledge(tmp_path, monkeypatch):
