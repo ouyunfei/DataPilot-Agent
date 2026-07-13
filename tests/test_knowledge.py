@@ -1,5 +1,8 @@
 import hashlib
 import importlib
+import os
+import sqlite3
+import subprocess
 import sys
 from types import ModuleType
 
@@ -483,6 +486,32 @@ def test_collects_queryability_for_all_sqlite_schema_objects(tmp_path):
     assert "可查询：是" in documents["column:orders.amount"].content
 
 
+def test_skips_metric_without_source_ownership_for_custom_sqlite(tmp_path):
+    db = SQLiteDatabase(tmp_path / "knowledge.db")
+    db.initialize()
+    source_path = tmp_path / "inventory.db"
+    with sqlite3.connect(source_path) as connection:
+        connection.execute(
+            "CREATE TABLE inventory (id INTEGER PRIMARY KEY, quantity INTEGER)"
+        )
+    source = db.create_data_source(
+        name="inventory",
+        db_type="sqlite",
+        database_url=str(source_path),
+        allowed_tables=["inventory"],
+        allowed_columns={"inventory": ["id", "quantity"]},
+    )
+
+    metrics = [
+        document.title
+        for document in knowledge_module.collect_knowledge_documents(db)
+        if document.data_source_id == source["id"]
+        and document.knowledge_type == "metric"
+    ]
+
+    assert "退款率" not in metrics
+
+
 def test_trusted_sql_requires_sqlite_and_current_whitelist(
     tmp_path, monkeypatch
 ):
@@ -577,8 +606,46 @@ def test_trusted_sql_field_references_exclude_projection_aliases(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    "sql", ["SELECT product_name FROM products", "SELECT status FROM orders"]
+)
+def test_skips_liked_history_outside_current_source_whitelist(tmp_path, sql):
+    db = SQLiteDatabase(tmp_path / "knowledge.db")
+    db.initialize()
+    source = db.get_default_data_source()
+    db.log_query(
+        question="旧查询",
+        sql=sql,
+        trusted_answer=False,
+        chart_type="",
+        row_count=1,
+        error=None,
+        duration_ms=10,
+        data_source_id=source["id"],
+        sql_explanation="使用旧白名单查询。",
+        answer="旧查询结果。",
+    )
+    log_id = db.list_query_logs()[0]["id"]
+    db.update_query_feedback(log_id, feedback="like")
+    db.update_data_source(
+        source["id"],
+        allowed_tables=["orders"],
+        allowed_columns={"orders": ["id", "amount"]},
+    )
+
+    historical = [
+        document
+        for document in knowledge_module.collect_knowledge_documents(db)
+        if document.knowledge_type == "historical_qa"
+    ]
+
+    assert historical == []
+
+
 def test_rebuild_script_collects_before_replacing_index(monkeypatch, capsys):
     rebuild = importlib.import_module("scripts.rebuild_knowledge_index")
+    config = importlib.import_module("app.core.config")
+    database = importlib.import_module("app.db.database")
     events = []
     documents = [_document(1, "sales", "销售额指标定义")]
 
@@ -607,11 +674,13 @@ def test_rebuild_script_collects_before_replacing_index(monkeypatch, capsys):
         events.append("collect")
         return documents
 
-    monkeypatch.setattr(rebuild, "SQLiteDatabase", FakeDatabase)
-    monkeypatch.setattr(rebuild, "BGEEmbedder", FakeBGEEmbedder)
-    monkeypatch.setattr(rebuild, "QdrantKnowledgeBase", FakeKnowledgeBase)
-    monkeypatch.setattr(rebuild, "collect_knowledge_documents", collect)
-    monkeypatch.setattr(rebuild, "EMBEDDING_MODEL", rebuild.EMBEDDING_MODEL_NAME)
+    monkeypatch.setattr(database, "SQLiteDatabase", FakeDatabase)
+    monkeypatch.setattr(knowledge_module, "BGEEmbedder", FakeBGEEmbedder)
+    monkeypatch.setattr(knowledge_module, "QdrantKnowledgeBase", FakeKnowledgeBase)
+    monkeypatch.setattr(knowledge_module, "collect_knowledge_documents", collect)
+    monkeypatch.setattr(
+        config, "EMBEDDING_MODEL", knowledge_module.EMBEDDING_MODEL_NAME
+    )
 
     assert rebuild.main() == 0
 
@@ -631,6 +700,8 @@ def test_rebuild_script_collects_before_replacing_index(monkeypatch, capsys):
 
 def test_rebuild_script_hides_exception_details(monkeypatch, capsys):
     rebuild = importlib.import_module("scripts.rebuild_knowledge_index")
+    config = importlib.import_module("app.core.config")
+    database = importlib.import_module("app.db.database")
 
     class FailingDatabase:
         def __init__(self, _path):
@@ -639,8 +710,10 @@ def test_rebuild_script_hides_exception_details(monkeypatch, capsys):
         def initialize(self):
             raise RuntimeError("mysql://user:password@host/private.db")
 
-    monkeypatch.setattr(rebuild, "SQLiteDatabase", FailingDatabase)
-    monkeypatch.setattr(rebuild, "EMBEDDING_MODEL", rebuild.EMBEDDING_MODEL_NAME)
+    monkeypatch.setattr(database, "SQLiteDatabase", FailingDatabase)
+    monkeypatch.setattr(
+        config, "EMBEDDING_MODEL", knowledge_module.EMBEDDING_MODEL_NAME
+    )
 
     assert rebuild.main() == 1
 
@@ -653,16 +726,42 @@ def test_rebuild_script_rejects_other_embedding_model_without_loading(
     monkeypatch, capsys
 ):
     rebuild = importlib.import_module("scripts.rebuild_knowledge_index")
+    config = importlib.import_module("app.core.config")
+    database = importlib.import_module("app.db.database")
 
     class UnexpectedDatabase:
         def __init__(self, _path):
             raise AssertionError("database must not load")
 
-    monkeypatch.setattr(rebuild, "SQLiteDatabase", UnexpectedDatabase)
-    monkeypatch.setattr(rebuild, "EMBEDDING_MODEL", "other/model")
+    monkeypatch.setattr(database, "SQLiteDatabase", UnexpectedDatabase)
+    monkeypatch.setattr(config, "EMBEDDING_MODEL", "other/model")
 
     assert rebuild.main() == 1
 
     stdout, stderr = capsys.readouterr()
     assert stdout == ""
     assert stderr == "索引重建失败：Embedding 模型配置错误\n"
+
+
+def test_rebuild_script_hides_config_import_errors(tmp_path):
+    env = os.environ | {
+        "KNOWLEDGE_TOP_K": "not-an-int",
+        "QDRANT_PATH": str(tmp_path / "private-password-index"),
+        "DEEPSEEK_BASE_URL": "https://user:password@example.com",
+    }
+
+    result = subprocess.run(
+        [sys.executable, "scripts/rebuild_knowledge_index.py"],
+        cwd=os.path.dirname(os.path.dirname(__file__)),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "索引重建失败：ValueError\n"
+    assert "Traceback" not in result.stderr
+    assert str(tmp_path) not in result.stderr
+    assert "password" not in result.stderr

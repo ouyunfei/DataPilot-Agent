@@ -130,6 +130,8 @@ def collect_knowledge_documents(db: SQLiteDatabase) -> list[KnowledgeDocument]:
                     )
                 }
             )
+            if not references:
+                continue
             documents.append(
                 KnowledgeDocument(
                     data_source_id=source_id,
@@ -146,7 +148,7 @@ def collect_knowledge_documents(db: SQLiteDatabase) -> list[KnowledgeDocument]:
             )
 
         documents.extend(_trusted_sql_documents(source))
-        documents.extend(_historical_qa_documents(db, source_id))
+        documents.extend(_historical_qa_documents(db, source))
 
     return documents
 
@@ -206,23 +208,41 @@ def _trusted_sql_documents(source: dict[str, Any]) -> list[KnowledgeDocument]:
 
 
 def _historical_qa_documents(
-    db: SQLiteDatabase, source_id: int
+    db: SQLiteDatabase, source: dict[str, Any]
 ) -> list[KnowledgeDocument]:
-    return [
-        KnowledgeDocument(
-            data_source_id=source_id,
-            knowledge_type="historical_qa",
-            source_id=str(item["id"]),
-            title=item["question"],
-            content=(
-                f"问题：{item['question']}\n"
-                f"SQL：{item['sql']}\n"
-                f"解释：{item['sql_explanation']}\n"
-                f"回答：{item['answer']}"
-            ),
-        )
-        for item in db.list_high_quality_historical_qa(source_id)
+    documents = []
+    dialect = {"sqlite": "sqlite", "postgresql": "postgres", "mysql": "mysql"}[
+        source["db_type"]
     ]
+    allowed_tables = set(source["allowed_tables"])
+    allowed_columns = {
+        table: set(columns) for table, columns in source["allowed_columns"].items()
+    }
+    for item in db.list_high_quality_historical_qa(source["id"]):
+        try:
+            validate_select_sql(
+                item["sql"],
+                allowed_tables=allowed_tables,
+                allowed_columns=allowed_columns,
+                dialect=dialect,
+            )
+        except SQLSafetyError:
+            continue
+        documents.append(
+            KnowledgeDocument(
+                data_source_id=source["id"],
+                knowledge_type="historical_qa",
+                source_id=str(item["id"]),
+                title=item["question"],
+                content=(
+                    f"问题：{item['question']}\n"
+                    f"SQL：{item['sql']}\n"
+                    f"解释：{item['sql_explanation']}\n"
+                    f"回答：{item['answer']}"
+                ),
+            )
+        )
+    return documents
 
 
 class BGEEmbedder:
