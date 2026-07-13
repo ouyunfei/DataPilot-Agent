@@ -830,14 +830,25 @@ class SQLiteDatabase:
                 for table in sorted(selected_tables)
             ]
 
+        with self._connect(source["database_url"]) as conn:
+            existing_tables = {
+                row["name"]
+                for row in conn.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table' AND name NOT GLOB 'sqlite_*'
+                    """
+                ).fetchall()
+            }
+        selected_tables = existing_tables if include_non_queryable else existing_tables & allowed_tables
         return [
             {
                 "name": table,
-                "description": description,
+                "description": TABLE_DESCRIPTIONS.get(table, ("", {}))[0],
                 "queryable": table in allowed_tables,
             }
-            for table, (description, _) in TABLE_DESCRIPTIONS.items()
-            if include_non_queryable or table in allowed_tables
+            for table in sorted(selected_tables)
         ]
 
     def list_catalog_columns(
@@ -855,8 +866,6 @@ class SQLiteDatabase:
         )
         table_queryable = table_name in source["allowed_tables"]
         if not table_queryable and not include_non_queryable:
-            return []
-        if source["db_type"] == "sqlite" and table_name not in TABLE_DESCRIPTIONS:
             return []
         allowed = set(source["allowed_columns"].get(table_name, [])) if table_queryable else set()
         _, field_descriptions = TABLE_DESCRIPTIONS.get(table_name, ("", {}))
@@ -885,7 +894,10 @@ class SQLiteDatabase:
             ]
 
         with self._connect(source["database_url"]) as conn:
-            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            rows = conn.execute(
+                "SELECT name, type FROM pragma_table_info(?) ORDER BY cid",
+                (table_name,),
+            ).fetchall()
 
         return [
             {

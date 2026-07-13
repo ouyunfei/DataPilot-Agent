@@ -1,3 +1,5 @@
+import sqlite3
+
 from app.db.database import SQLiteDatabase
 import pytest
 
@@ -316,6 +318,50 @@ def test_database_catalog_can_include_non_queryable_schema(tmp_path):
     assert next(table for table in all_tables if table["name"] == "products")["queryable"] is False
     assert product_columns
     assert all(column["queryable"] is False for column in product_columns)
+
+
+def test_database_catalog_introspects_selected_sqlite_source(tmp_path):
+    db = SQLiteDatabase(tmp_path / "catalog.db")
+    db.initialize()
+    source_path = tmp_path / "external.db"
+    with sqlite3.connect(source_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE sales (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                region TEXT NOT NULL,
+                revenue REAL NOT NULL
+            );
+            CREATE TABLE inventory (
+                id INTEGER PRIMARY KEY,
+                sku TEXT NOT NULL
+            );
+            """
+        )
+    source = db.create_data_source(
+        name="external_sqlite",
+        db_type="sqlite",
+        database_url=str(source_path),
+        allowed_tables=["sales"],
+        allowed_columns={"sales": ["id", "revenue"]},
+    )
+
+    public_tables = db.list_catalog_tables(source["id"])
+    all_tables = db.list_catalog_tables(source["id"], include_non_queryable=True)
+    inventory_columns = db.list_catalog_columns(
+        "inventory",
+        source["id"],
+        include_non_queryable=True,
+    )
+
+    assert public_tables == [{"name": "sales", "description": "", "queryable": True}]
+    assert all_tables == [
+        {"name": "inventory", "description": "", "queryable": False},
+        {"name": "sales", "description": "", "queryable": True},
+    ]
+    assert [column["name"] for column in inventory_columns] == ["id", "sku"]
+    assert all(column["queryable"] is False for column in inventory_columns)
+    assert db.list_catalog_columns("missing", source["id"], include_non_queryable=True) == []
 
 
 def test_database_updates_data_source_and_switches_default(tmp_path):
