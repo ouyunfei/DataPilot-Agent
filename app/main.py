@@ -2,7 +2,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from app.agent.workflow import DataAnalysisAgent
+from app.agent.workflow import DataAnalysisAgent, KnowledgeRetriever
 from app.api.routes import create_chat_router
 from app.core.config import (
     DEEPSEEK_API_KEY,
@@ -10,13 +10,22 @@ from app.core.config import (
     DEEPSEEK_MODEL,
     DEEPSEEK_TIMEOUT_SECONDS,
     DEFAULT_DATABASE_PATH,
+    EMBEDDING_MODEL,
+    KNOWLEDGE_TOP_K,
+    QDRANT_COLLECTION,
+    QDRANT_PATH,
 )
 from app.db.database import SQLiteDatabase
 from app.schemas.chat import HealthResponse
+from app.services.knowledge import BGEEmbedder, QdrantKnowledgeBase
 from app.services.llm import BaseLLMClient, DeepSeekLLMClient, UnavailableLLMClient
 
 
-def create_app(database_path: str | Path | None = None, llm: BaseLLMClient | None = None) -> FastAPI:
+def create_app(
+    database_path: str | Path | None = None,
+    llm: BaseLLMClient | None = None,
+    knowledge: KnowledgeRetriever | None = None,
+) -> FastAPI:
     db = SQLiteDatabase(database_path or DEFAULT_DATABASE_PATH)
     db.initialize()
 
@@ -31,7 +40,18 @@ def create_app(database_path: str | Path | None = None, llm: BaseLLMClient | Non
         )
     else:
         llm_client = UnavailableLLMClient("缺少 DEEPSEEK_API_KEY，请在 .env 或环境变量中配置。")
-    agent = DataAnalysisAgent(db=db, llm=llm_client)
+
+    if knowledge is None:
+        try:
+            knowledge = QdrantKnowledgeBase(
+                path=QDRANT_PATH,
+                collection_name=QDRANT_COLLECTION,
+                embedder=BGEEmbedder(EMBEDDING_MODEL),
+                top_k=KNOWLEDGE_TOP_K,
+            )
+        except ValueError:
+            knowledge = None
+    agent = DataAnalysisAgent(db=db, llm=llm_client, knowledge=knowledge)
 
     app = FastAPI(
         title="DataPilot Agent",

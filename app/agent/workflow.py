@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import logging
 import time
-from typing import Any
+from typing import Any, Protocol
 
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
@@ -14,6 +15,15 @@ from app.services.semantic import build_semantic_context, find_trusted_answer, r
 from app.services.sql_validator import SQLSafetyError, validate_select_sql
 
 
+logger = logging.getLogger(__name__)
+
+
+class KnowledgeRetriever(Protocol):
+    def retrieve(
+        self, question: str, data_source_id: int
+    ) -> tuple[str, list[dict[str, Any]]]: ...
+
+
 class AnalysisState(TypedDict, total=False):
     question: str
     session_id: str
@@ -21,6 +31,8 @@ class AnalysisState(TypedDict, total=False):
     data_source_id: int
     data_source: dict[str, Any]
     schema: str
+    knowledge_context: str
+    knowledge_sources: list[dict[str, Any]]
     sql: str
     sql_explanation: str
     validated_sql: str
@@ -36,9 +48,15 @@ class AnalysisState(TypedDict, total=False):
 class DataAnalysisAgent:
     """LangGraph-powered data analysis workflow."""
 
-    def __init__(self, db: SQLiteDatabase, llm: BaseLLMClient) -> None:
+    def __init__(
+        self,
+        db: SQLiteDatabase,
+        llm: BaseLLMClient,
+        knowledge: KnowledgeRetriever | None = None,
+    ) -> None:
         self.db = db
         self.llm = llm
+        self.knowledge = knowledge
         self.graph = self._build_graph()
 
     def run(
@@ -58,7 +76,9 @@ class DataAnalysisAgent:
             result: AnalysisState = {
                 "question": question,
                 "session_id": session_id,
-                "data_source_id": data_source_id or 0,
+                "data_source_id": data_source_id if data_source_id is not None else 0,
+                "knowledge_context": "",
+                "knowledge_sources": [],
                 "sql": "",
                 "sql_explanation": "",
                 "data": [],
@@ -69,7 +89,17 @@ class DataAnalysisAgent:
                 "error": "数据源不存在",
                 "error_code": "data_source_error",
             }
-            self.db.log_query(question, "", False, "", 0, result["error"], 0, result["error_code"])
+            self.db.log_query(
+                question,
+                "",
+                False,
+                "",
+                0,
+                result["error"],
+                0,
+                result["error_code"],
+                data_source_id=data_source_id,
+            )
             self.db.save_chat_message(session_id, question, "", "")
             return result
 
@@ -82,6 +112,8 @@ class DataAnalysisAgent:
                 "data_source_id": data_source["id"],
                 "data_source": data_source,
                 "schema": "",
+                "knowledge_context": "",
+                "knowledge_sources": [],
                 "sql": "",
                 "sql_explanation": "",
                 "validated_sql": "",
@@ -105,6 +137,9 @@ class DataAnalysisAgent:
             error=result.get("error"),
             duration_ms=duration_ms,
             error_code=result.get("error_code"),
+            data_source_id=data_source["id"],
+            sql_explanation=result.get("sql_explanation", ""),
+            answer=result.get("answer", ""),
         )
         self.db.save_chat_message(
             session_id=session_id,
@@ -119,13 +154,15 @@ class DataAnalysisAgent:
         workflow = StateGraph(AnalysisState)
 
         workflow.add_node("retrieve_schema", self._retrieve_schema)
+        workflow.add_node("retrieve_knowledge", self._retrieve_knowledge)
         workflow.add_node("generate_sql", self._generate_sql)
         workflow.add_node("validate_sql", self._validate_sql)
         workflow.add_node("execute_sql", self._execute_sql)
         workflow.add_node("analyze_result", self._analyze_result)
 
         workflow.add_edge(START, "retrieve_schema")
-        workflow.add_edge("retrieve_schema", "generate_sql")
+        workflow.add_edge("retrieve_schema", "retrieve_knowledge")
+        workflow.add_edge("retrieve_knowledge", "generate_sql")
         workflow.add_edge("generate_sql", "validate_sql")
         workflow.add_conditional_edges(
             "validate_sql",
@@ -149,6 +186,18 @@ class DataAnalysisAgent:
             schema = f"{schema}\n\n{state['session_context']}"
         return {"schema": schema}
 
+    def _retrieve_knowledge(self, state: AnalysisState) -> dict[str, Any]:
+        if self.knowledge is None:
+            return {"knowledge_context": "", "knowledge_sources": []}
+        try:
+            context, sources = self.knowledge.retrieve(
+                state["question"], state["data_source_id"]
+            )
+        except Exception as exc:
+            logger.warning("Knowledge retrieval unavailable: %s", type(exc).__name__)
+            return {"knowledge_context": "", "knowledge_sources": []}
+        return {"knowledge_context": context, "knowledge_sources": sources}
+
     def _generate_sql(self, state: AnalysisState) -> dict[str, str | bool]:
         trusted_answer = (
             find_trusted_answer(state["question"])
@@ -163,9 +212,12 @@ class DataAnalysisAgent:
             }
 
         try:
+            schema = state["schema"]
+            if state.get("knowledge_context"):
+                schema = f"{schema}\n\n{state['knowledge_context']}"
             generation = self.llm.generate_sql(
                 question=state["question"],
-                schema=state["schema"],
+                schema=schema,
             )
         except Exception as exc:
             return {

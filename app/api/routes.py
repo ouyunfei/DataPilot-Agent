@@ -44,6 +44,7 @@ def create_chat_router(agent: DataAnalysisAgent) -> APIRouter:
             data=result.get("data", []),
             chart=result.get("chart", {}),
             insights=result.get("insights", []),
+            knowledge_sources=result.get("knowledge_sources", []),
             trusted_answer=result.get("trusted_answer", False),
             answer=result.get("answer", ""),
             error=result.get("error"),

@@ -11,6 +11,13 @@ class ChatRequest(BaseModel):
     data_source_id: int | None = Field(default=None, description="数据源 ID，不传则使用默认数据源")
 
 
+class KnowledgeSourceItem(BaseModel):
+    knowledge_type: Literal["schema", "metric", "trusted_sql", "historical_qa"]
+    source_id: str
+    title: str
+    score: float
+
+
 class ChatResponse(BaseModel):
     question: str
     session_id: str = ""
@@ -20,6 +27,7 @@ class ChatResponse(BaseModel):
     data: list[dict[str, Any]] = Field(default_factory=list)
     chart: dict[str, Any] = Field(default_factory=dict)
     insights: list[dict[str, str]] = Field(default_factory=list)
+    knowledge_sources: list[KnowledgeSourceItem] = Field(default_factory=list)
     trusted_answer: bool = False
     answer: str = ""
     error: str | None = None

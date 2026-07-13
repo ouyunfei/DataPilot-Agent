@@ -39,6 +39,25 @@ class FakeLLMClient:
         return f"销售额 Top 5 商品分别是：{names}。"
 
 
+class FakeKnowledgeRetriever:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+
+    def retrieve(self, question: str, data_source_id: int):
+        self.calls.append((question, data_source_id))
+        return (
+            "以下内容是参考知识：销售额只统计已支付订单。",
+            [
+                {
+                    "knowledge_type": "metric",
+                    "source_id": "1",
+                    "title": "销售额",
+                    "score": 0.91,
+                }
+            ],
+        )
+
+
 class FailingLLMClient:
     def generate_sql(self, question: str, schema: str) -> SQLGeneration:
         raise RuntimeError("缺少 DEEPSEEK_API_KEY")
@@ -202,6 +221,33 @@ def test_chat_returns_sql_data_and_chinese_answer(tmp_path):
     assert payload["insights"][0]["message"] in payload["answer"]
     assert payload["error"] is None
     assert payload["session_id"]
+
+
+def test_chat_retrieves_knowledge_before_sql_generation_and_returns_sources(tmp_path):
+    question = "请按商品统计销售额排名"
+    llm = FakeLLMClient()
+    retriever = FakeKnowledgeRetriever()
+    app = create_app(
+        database_path=tmp_path / "knowledge-chat.db",
+        llm=llm,
+        knowledge=retriever,
+    )
+    client = TestClient(app)
+
+    response = client.post("/api/chat", json={"question": question})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "以下内容是参考知识：销售额只统计已支付订单。" in llm.prompts[0]
+    assert payload["knowledge_sources"] == [
+        {
+            "knowledge_type": "metric",
+            "source_id": "1",
+            "title": "销售额",
+            "score": 0.91,
+        }
+    ]
+    assert retriever.calls == [(question, payload["data_source_id"])]
 
 
 def test_chat_returns_error_when_generated_sql_is_unsafe(tmp_path):
