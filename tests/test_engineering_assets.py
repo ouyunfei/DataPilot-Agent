@@ -11,6 +11,9 @@ def test_docker_assets_exist_and_use_env_file():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     postgres_init = ROOT / "docker" / "postgres" / "init.sql"
     mysql_init = ROOT / "docker" / "mysql" / "init.sql"
 
@@ -20,6 +23,7 @@ def test_docker_assets_exist_and_use_env_file():
     assert ".env" in compose
     assert "postgres:" in compose
     assert "mysql:" in compose
+    assert "qdrant:" not in compose
     assert "mysql_data:" in compose
     assert "${MYSQL_PORT:-3307}:3306" in compose
     assert postgres_init.exists()
@@ -32,8 +36,15 @@ def test_docker_assets_exist_and_use_env_file():
     assert "CREATE TABLE orders" in mysql_sql
     assert "CREATE USER" in mysql_sql
     assert "GRANT SELECT" in mysql_sql
-    assert "PyMySQL[rsa]" in (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    assert "PyMySQL[rsa]" in requirements
+    assert "qdrant-client==1.18.0" in requirements
+    assert "sentence-transformers==5.6.0" in requirements
     assert ".env" in dockerignore
+    assert "data/qdrant/" in gitignore
+    assert "QDRANT_PATH=data/qdrant" in env_example
+    assert "QDRANT_COLLECTION=datapilot_knowledge_bge_small_zh_v15" in env_example
+    assert "EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5" in env_example
+    assert "KNOWLEDGE_TOP_K=5" in env_example
 
 
 def test_ci_runs_pytest_without_deepseek_secret():
