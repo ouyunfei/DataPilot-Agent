@@ -12,6 +12,7 @@ from app.services.knowledge import (
     QUERY_INSTRUCTION,
     KnowledgeDocument,
     QdrantKnowledgeBase,
+    _validated_vector,
 )
 
 
@@ -171,6 +172,15 @@ def test_bge_embedder_rejects_wrong_vector_dimension(monkeypatch):
         BGEEmbedder().embed_query("销售额")
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_vector_validation_rejects_non_finite_values(value):
+    vector = [0.0] * EMBEDDING_DIMENSION
+    vector[0] = value
+
+    with pytest.raises(ValueError, match="有限"):
+        _validated_vector(vector)
+
+
 def test_qdrant_local_rebuild_is_idempotent_and_searchable(tmp_path):
     path = tmp_path / "qdrant"
     embedder = FakeEmbedder()
@@ -293,6 +303,44 @@ def test_rebuild_validates_embedding_dimension_before_replacing_collection(tmp_p
     assert _count(path, "knowledge") == 1
 
 
+def test_rebuild_rejects_non_finite_vector_before_replacing_collection(tmp_path):
+    path = tmp_path / "non-finite-rebuild"
+    knowledge = QdrantKnowledgeBase(path, "knowledge", FakeEmbedder(), top_k=5)
+    knowledge.rebuild([_document(1, "old", "销售额指标定义")])
+
+    class NonFiniteDocumentEmbedder(FakeEmbedder):
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            vectors = super().embed_documents(texts)
+            vectors[0][0] = float("nan")
+            return vectors
+
+    knowledge.embedder = NonFiniteDocumentEmbedder()
+
+    with pytest.raises(ValueError, match="有限"):
+        knowledge.rebuild([_document(1, "new", "新的销售额定义")])
+
+    assert _count(path, "knowledge") == 1
+    assert [hit["source_id"] for hit in knowledge.search("销售额", 1)] == ["old"]
+
+
+def test_search_rejects_non_finite_query_vector(tmp_path):
+    knowledge = QdrantKnowledgeBase(
+        tmp_path / "non-finite-query", "knowledge", FakeEmbedder(), top_k=5
+    )
+    knowledge.rebuild([_document(1, "sales", "销售额指标定义")])
+
+    class NonFiniteQueryEmbedder(FakeEmbedder):
+        def embed_query(self, text: str) -> list[float]:
+            vector = super().embed_query(text)
+            vector[0] = float("inf")
+            return vector
+
+    knowledge.embedder = NonFiniteQueryEmbedder()
+
+    with pytest.raises(ValueError, match="有限"):
+        knowledge.search("销售额", 1)
+
+
 def test_retrieve_limits_context_and_minimizes_sources(tmp_path):
     knowledge = QdrantKnowledgeBase(
         path=tmp_path / "context",
@@ -321,6 +369,33 @@ def test_retrieve_limits_context_and_minimizes_sources(tmp_path):
         set(source) == {"knowledge_type", "source_id", "title", "score"}
         for source in sources
     )
+
+
+def test_retrieve_skips_oversized_hit_and_includes_later_hit(tmp_path):
+    knowledge = QdrantKnowledgeBase(
+        path=tmp_path / "oversized",
+        collection_name="oversized",
+        embedder=FakeEmbedder(),
+        top_k=5,
+    )
+    knowledge.rebuild(
+        [
+            KnowledgeDocument(
+                data_source_id=1,
+                knowledge_type="metric",
+                source_id="oversized",
+                title="超" * MAX_CONTEXT_CHARS,
+                content="销售额",
+            ),
+            _document(1, "normal", "订单指标定义"),
+        ]
+    )
+
+    context, sources = knowledge.retrieve("销售额", data_source_id=1)
+
+    assert "normal" in context
+    assert [source["source_id"] for source in sources] == ["normal"]
+    assert len(context) <= MAX_CONTEXT_CHARS
 
 
 def test_retrieve_returns_empty_context_and_sources_without_hits(tmp_path):
