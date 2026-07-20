@@ -46,6 +46,8 @@ def test_docker_assets_exist_and_use_env_file():
     assert "QDRANT_COLLECTION=datapilot_knowledge_bge_small_zh_v15" in env_example
     assert "EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5" in env_example
     assert "KNOWLEDGE_TOP_K=5" in env_example
+    assert "META_DB_TYPE=sqlite" in env_example
+    assert "META_DATABASE_URL=" in env_example
 
 
 def test_ci_runs_pytest_without_deepseek_secret():

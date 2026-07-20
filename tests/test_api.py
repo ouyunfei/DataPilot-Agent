@@ -505,6 +505,46 @@ def test_app_can_start_without_deepseek_key(tmp_path, monkeypatch):
     assert "DEEPSEEK_API_KEY" in chat.json()["error"]
 
 
+def test_create_app_uses_mysql_meta_database_when_configured(tmp_path, monkeypatch):
+    from fastapi import APIRouter
+    import app.main as main_module
+
+    captured = {}
+
+    class FakeMySQLMetaDatabase:
+        def __init__(self, database_url, sqlite_path):
+            self.database_url = database_url
+            self.sqlite_path = sqlite_path
+            self.initialized = False
+
+        def initialize(self):
+            self.initialized = True
+
+    def fake_router(agent):
+        captured["db"] = agent.db
+        return APIRouter()
+
+    monkeypatch.setattr(main_module, "META_DB_TYPE", "mysql")
+    monkeypatch.setattr(
+        main_module,
+        "META_DATABASE_URL",
+        "mysql://user:secret@localhost:3306/datapilot",
+    )
+    monkeypatch.setattr(main_module, "MySQLMetaDatabase", FakeMySQLMetaDatabase, raising=False)
+    monkeypatch.setattr(main_module, "create_chat_router", fake_router)
+
+    main_module.create_app(
+        database_path=tmp_path / "demo.db",
+        llm=FakeLLMClient(),
+        knowledge=None,
+    )
+
+    assert isinstance(captured["db"], FakeMySQLMetaDatabase)
+    assert captured["db"].database_url == "mysql://user:secret@localhost:3306/datapilot"
+    assert captured["db"].sqlite_path == tmp_path / "demo.db"
+    assert captured["db"].initialized is True
+
+
 def test_security_policies_endpoint_returns_current_sql_rules(tmp_path):
     app = create_app(database_path=tmp_path / "security.db", llm=FakeLLMClient(), knowledge=None)
     client = TestClient(app)

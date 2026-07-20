@@ -13,10 +13,13 @@ from app.core.config import (
     DEFAULT_DATABASE_PATH,
     EMBEDDING_MODEL,
     KNOWLEDGE_TOP_K,
+    META_DATABASE_URL,
+    META_DB_TYPE,
     QDRANT_COLLECTION,
     QDRANT_PATH,
 )
 from app.db.database import SQLiteDatabase
+from app.db.meta_mysql import MySQLMetaDatabase
 from app.schemas.chat import HealthResponse
 from app.services.knowledge import BGEEmbedder, QdrantKnowledgeBase
 from app.services.llm import BaseLLMClient, DeepSeekLLMClient, UnavailableLLMClient
@@ -30,7 +33,7 @@ def create_app(
     llm: BaseLLMClient | None = None,
     knowledge: KnowledgeRetriever | None | object = _AUTO,
 ) -> FastAPI:
-    db = SQLiteDatabase(database_path or DEFAULT_DATABASE_PATH)
+    db = _create_database(database_path or DEFAULT_DATABASE_PATH)
     db.initialize()
 
     if llm is not None:
@@ -87,6 +90,16 @@ def create_app(
 
 def _deepseek_configured() -> bool:
     return bool(DEEPSEEK_API_KEY and DEEPSEEK_API_KEY != "your_deepseek_api_key")
+
+
+def _create_database(database_path: str | Path) -> SQLiteDatabase:
+    if META_DB_TYPE == "sqlite":
+        return SQLiteDatabase(database_path)
+    if META_DB_TYPE == "mysql":
+        if not META_DATABASE_URL:
+            raise ValueError("META_DB_TYPE=mysql 时必须配置 META_DATABASE_URL")
+        return MySQLMetaDatabase(META_DATABASE_URL, database_path)
+    raise ValueError("META_DB_TYPE 只支持 sqlite 或 mysql")
 
 
 app = create_app()
