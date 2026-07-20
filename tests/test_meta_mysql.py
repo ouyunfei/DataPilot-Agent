@@ -112,8 +112,10 @@ def test_mysql_meta_database_initializes_platform_tables_and_defaults(tmp_path):
         "chat_messages",
     } <= fake.table_names()
     source = db.get_default_data_source()
-    assert source["name"] == "default_sqlite"
-    assert source["database_url"] == str(tmp_path / "demo.db")
+    assert source["name"] == "default_mysql"
+    assert source["db_type"] == "mysql"
+    assert source["database_url"] == "mysql://datapilot_ro:datapilot123@127.0.0.1:3307/datapilot"
+    assert source["allowed_tables"] == ["orders", "users", "products"]
     assert len(db.list_metrics()) == len(DEFAULT_METRICS)
 
 

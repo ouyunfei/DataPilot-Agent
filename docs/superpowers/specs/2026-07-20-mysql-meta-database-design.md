@@ -105,7 +105,7 @@ get_query_stats()
 
 `MySQLMetaDatabase` 只替换平台元数据读写。业务查询能力继续复用现有 `SQLiteDatabase` 的数据源执行逻辑和 `MySQLClient` / `PostgresClient` 适配逻辑。
 
-为避免大重构，MySQL 模式仍会保留默认 SQLite 演示库文件作为已有 `default_sqlite` 数据源的回滚和演示路径。后续如果要完全 MySQL 化，单独迁移业务表并把默认数据源更新为 `db_type=mysql`。
+为避免大重构，MySQL 模式仍会保留默认 SQLite 演示库文件作为回滚和演示路径，但默认数据源本身会切到 `default_mysql` 并指向 Docker 示例 MySQL。后续如果要完全 MySQL 化，单独迁移业务表并移除 SQLite 默认路径。
 
 ## 6. MySQL 表结构
 
@@ -191,7 +191,7 @@ MySQL 元数据库 `initialize()`：
 
 1. 连接 `META_DATABASE_URL`。
 2. 创建 5 张平台表。
-3. 若没有默认数据源，插入现有默认 `default_sqlite` 数据源。
+3. 若没有默认数据源，插入现有默认 `default_mysql` 数据源；若历史数据还保留 `default_sqlite`，启动时会收敛为 `default_mysql`。
 4. 若没有默认指标，插入 `DEFAULT_METRICS`。
 
 MySQL 不自动创建数据库本身。用户需要先在 Navicat 或 SQL 中创建 `datapilot` 库。

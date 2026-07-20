@@ -212,7 +212,7 @@ retrieve_schema -> retrieve_knowledge -> generate_sql -> validate_sql
 | `is_default` | 是否默认数据源 |
 | `created_at` | 创建时间 |
 
-启动时自动初始化默认数据源 `default_sqlite`，白名单表为 `orders`、`users`、`products`。SQLite、PostgreSQL 和 MySQL 均支持真实连接测试、数据目录读取和只读查询；MySQL 数据源必须显式配置字段白名单。
+启动时自动初始化默认数据源 `default_mysql`，指向 Docker 示例 MySQL `mysql://datapilot_ro:***@127.0.0.1:3307/datapilot`，白名单表为 `orders`、`users`、`products`。SQLite、PostgreSQL 和 MySQL 均支持真实连接测试、数据目录读取和只读查询；MySQL 数据源必须显式配置字段白名单。
 
 Docker 提供 MySQL 示例库，首次启动自动创建三张业务表并初始化 80 个用户、30 个商品和 1000 个订单。真实 MySQL 数据源不会自动建表或写入数据，推荐使用只有 `SELECT` 权限的账号。数据源接口返回连接地址时会隐藏密码。
 

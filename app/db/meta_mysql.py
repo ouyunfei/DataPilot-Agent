@@ -11,6 +11,11 @@ from app.db.database import DEFAULT_METRICS, SQLiteDatabase
 from app.db.mysql import MySQLClient
 
 
+DEFAULT_MYSQL_DATA_SOURCE_NAME = "default_mysql"
+DEFAULT_MYSQL_DATA_SOURCE_URL = "mysql://datapilot_ro:datapilot123@127.0.0.1:3307/datapilot"
+DEFAULT_MYSQL_DATA_SOURCE_TABLES = ["orders", "users", "products"]
+
+
 class MySQLMetaDatabase(SQLiteDatabase):
     """MySQL-backed platform metadata, SQLite kept for demo business data."""
 
@@ -102,9 +107,114 @@ class MySQLMetaDatabase(SQLiteDatabase):
             self._execute(sql)
 
     def _seed_mysql_default_data_source(self) -> None:
-        if self._fetchone("SELECT 1 FROM data_sources WHERE is_default = 1 LIMIT 1"):
+        tables = DEFAULT_MYSQL_DATA_SOURCE_TABLES
+        allowed_columns = SQLiteDatabase._default_allowed_columns(tables)
+        default_row = self._fetchone(
+            """
+            SELECT
+                id, name, db_type, database_url, allowed_tables,
+                allowed_columns
+            FROM data_sources
+            WHERE is_default = 1
+            ORDER BY id ASC
+            LIMIT 1
+            """
+        )
+        mysql_row = self._fetchone(
+            """
+            SELECT
+                id, name, db_type, database_url, allowed_tables,
+                allowed_columns
+            FROM data_sources
+            WHERE name = %s
+            ORDER BY is_default DESC, id ASC
+            LIMIT 1
+            """,
+            (DEFAULT_MYSQL_DATA_SOURCE_NAME,),
+        )
+        if mysql_row is not None:
+            current_tables = json.loads(mysql_row["allowed_tables"])
+            current_allowed_columns = (
+                json.loads(mysql_row["allowed_columns"])
+                if mysql_row["allowed_columns"]
+                else SQLiteDatabase._default_allowed_columns(current_tables)
+            )
+            if (
+                mysql_row["db_type"] == "mysql"
+                and mysql_row["database_url"] == DEFAULT_MYSQL_DATA_SOURCE_URL
+                and current_tables == tables
+                and current_allowed_columns == allowed_columns
+            ):
+                if default_row is not None and default_row["id"] != mysql_row["id"]:
+                    self._execute(
+                        "UPDATE data_sources SET is_default = 0 WHERE id = %s",
+                        (default_row["id"],),
+                    )
+                    self._execute(
+                        "UPDATE data_sources SET is_default = 1 WHERE id = %s",
+                        (mysql_row["id"],),
+                    )
+                return
+            self._execute(
+                """
+                UPDATE data_sources
+                SET db_type = %s,
+                    database_url = %s,
+                    allowed_tables = %s,
+                    allowed_columns = %s,
+                    is_default = 1
+                WHERE id = %s
+                """,
+                (
+                    "mysql",
+                    DEFAULT_MYSQL_DATA_SOURCE_URL,
+                    json.dumps(tables, ensure_ascii=False),
+                    json.dumps(allowed_columns, ensure_ascii=False),
+                    mysql_row["id"],
+                ),
+            )
+            if default_row is not None and default_row["id"] != mysql_row["id"]:
+                self._execute(
+                    "UPDATE data_sources SET is_default = 0 WHERE id = %s",
+                    (default_row["id"],),
+                )
             return
-        tables = ["orders", "users", "products"]
+        if default_row is not None:
+            current_tables = json.loads(default_row["allowed_tables"])
+            current_allowed_columns = (
+                json.loads(default_row["allowed_columns"])
+                if default_row["allowed_columns"]
+                else SQLiteDatabase._default_allowed_columns(current_tables)
+            )
+            if (
+                default_row["name"] == DEFAULT_MYSQL_DATA_SOURCE_NAME
+                and default_row["db_type"] == "mysql"
+                and default_row["database_url"] == DEFAULT_MYSQL_DATA_SOURCE_URL
+                and current_tables == tables
+                and current_allowed_columns == allowed_columns
+            ):
+                return
+            self._execute(
+                """
+                UPDATE data_sources
+                SET name = %s,
+                    db_type = %s,
+                    database_url = %s,
+                    allowed_tables = %s,
+                    allowed_columns = %s,
+                    is_default = 1
+                WHERE id = %s
+                """,
+                (
+                    DEFAULT_MYSQL_DATA_SOURCE_NAME,
+                    "mysql",
+                    DEFAULT_MYSQL_DATA_SOURCE_URL,
+                    json.dumps(tables, ensure_ascii=False),
+                    json.dumps(allowed_columns, ensure_ascii=False),
+                    default_row["id"],
+                ),
+            )
+            return
         self._execute(
             """
             INSERT INTO data_sources (
@@ -113,11 +223,11 @@ class MySQLMetaDatabase(SQLiteDatabase):
             VALUES (%s, %s, %s, %s, %s, 1)
             """,
             (
-                "default_sqlite",
-                "sqlite",
-                str(self.path),
+                DEFAULT_MYSQL_DATA_SOURCE_NAME,
+                "mysql",
+                DEFAULT_MYSQL_DATA_SOURCE_URL,
                 json.dumps(tables, ensure_ascii=False),
-                json.dumps(self._default_allowed_columns(tables), ensure_ascii=False),
+                json.dumps(allowed_columns, ensure_ascii=False),
             ),
         )
 

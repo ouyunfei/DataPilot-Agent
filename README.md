@@ -215,6 +215,7 @@ META_DATABASE_URL=mysql://user:password@localhost:3306/datapilot
 ```
 
 启动后 5 张平台表会在 MySQL 中初始化：`data_sources`、`metrics`、`query_logs`、`chat_sessions`、`chat_messages`。本阶段只迁移平台元数据，不迁移 `orders/users/products` 业务表，也不删除 SQLite 回滚路径。
+默认数据源会指向 Docker MySQL 示例库 `default_mysql`，业务查询仍只允许 `SELECT`。
 
 一次性迁移：
 
