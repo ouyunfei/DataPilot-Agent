@@ -76,5 +76,34 @@ def test_eval_script_runs_successfully():
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Eval passed:" in result.stdout
     assert "Success rate:" in result.stdout
-    assert "RAG comparison: off 0/3, on 3/3" in result.stdout
-    assert "RAG improvement: +100.00pp" in result.stdout
+    assert "Synthetic RAG workflow check: off 0/3, on 3/3" in result.stdout
+    assert "Synthetic workflow delta: +100.00pp" in result.stdout
+    assert "Uses a fake LLM/retriever; not a real-model quality benchmark." in result.stdout
+    assert "RAG improvement" not in result.stdout
+
+
+def test_synthetic_rag_failure_diagnostic_names_case_and_arm(monkeypatch):
+    from scripts import run_evals
+
+    item = {
+        "id": "gross_profit_by_brand",
+        "question": "question",
+        "expected_sql_fragments": ["orders.amount - products.cost_price"],
+    }
+
+    class SemanticallyWrongAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, _question):
+            return {"sql": "SELECT SUM(orders.amount) FROM orders", "data": [{"value": 1}]}
+
+    monkeypatch.setattr(run_evals, "RAG_CASES", [item])
+    monkeypatch.setattr(run_evals, "DataAnalysisAgent", SemanticallyWrongAgent)
+
+    assert run_evals._run_rag_comparison(object()) == (
+        0,
+        0,
+        True,
+        ["gross_profit_by_brand [on]: semantic SQL expectations failed"],
+    )

@@ -127,22 +127,26 @@ def main() -> int:
             result = agent.run(item["question"])
             failures.extend(_check_case(item, result))
 
-        rag_off, rag_on, rag_execution_ok = _run_rag_comparison(db)
+        rag_off, rag_on, rag_execution_ok, rag_failures = _run_rag_comparison(db)
 
     passed = len(questions) - len({failure.split(':', 1)[0] for failure in failures})
     total = len(questions)
     print(f"Eval passed: {passed}/{total}")
     print(f"Success rate: {passed / total * 100:.2f}%")
     rag_total = len(RAG_CASES)
-    print(f"RAG comparison: off {rag_off}/{rag_total}, on {rag_on}/{rag_total}")
-    print(f"RAG improvement: +{(rag_on - rag_off) / rag_total * 100:.2f}pp")
+    print(f"Synthetic RAG workflow check: off {rag_off}/{rag_total}, on {rag_on}/{rag_total}")
+    print(f"Synthetic workflow delta: +{(rag_on - rag_off) / rag_total * 100:.2f}pp")
+    print("Uses a fake LLM/retriever; not a real-model quality benchmark.")
 
     if failures:
         print("Failures:")
         for failure in failures:
             print(f"- {failure}")
-        return 1
-    if not rag_execution_ok or rag_on != rag_total or rag_on <= rag_off:
+    if rag_failures:
+        print("Synthetic workflow failures:")
+        for failure in rag_failures:
+            print(f"- {failure}")
+    if failures or rag_failures or not rag_execution_ok or rag_on != rag_total or rag_on <= rag_off:
         return 1
     return 0
 
@@ -259,19 +263,31 @@ def _sql_for_question(question: str) -> str:
     """
 
 
-def _run_rag_comparison(db: SQLiteDatabase) -> tuple[int, int, bool]:
+def _run_rag_comparison(db: SQLiteDatabase) -> tuple[int, int, bool, list[str]]:
     llm = RAGEvalLLMClient()
     agents = (
         DataAnalysisAgent(db=db, llm=llm),
         DataAnalysisAgent(db=db, llm=llm, knowledge=RAGEvalKnowledgeRetriever()),
     )
     scores: list[int] = []
+    failures: list[str] = []
     all_executable = True
-    for agent in agents:
+    for arm, agent in zip(("off", "on"), agents):
         results = [agent.run(item["question"]) for item in RAG_CASES]
         all_executable &= all(not result.get("error") and result.get("data") for result in results)
-        scores.append(sum(_rag_case_passes(item, result) for item, result in zip(RAG_CASES, results)))
-    return scores[0], scores[1], all_executable
+        case_passes = [
+            _rag_case_passes(item, result) for item, result in zip(RAG_CASES, results)
+        ]
+        scores.append(sum(case_passes))
+        for item, result, passed in zip(RAG_CASES, results, case_passes):
+            prefix = f"{item['id']} [{arm}]"
+            if result.get("error"):
+                failures.append(f"{prefix}: agent error: {result['error']}")
+            elif not result.get("data"):
+                failures.append(f"{prefix}: query returned no data")
+            elif passed != (arm == "on"):
+                failures.append(f"{prefix}: semantic SQL expectations failed")
+    return scores[0], scores[1], all_executable, failures
 
 
 def _rag_case_passes(item: dict[str, Any], result: dict[str, Any]) -> bool:
