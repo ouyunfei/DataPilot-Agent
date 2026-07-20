@@ -114,7 +114,7 @@ PostgreSQL 不再作为默认运行依赖。可以先保留适配器和测试，
 - 在 LangGraph 中使用 `retrieve_knowledge` 节点；无目录、无 Collection、无结果或检索/模型异常时 fail-open 回退原流程。
 - 重建前停止后端，运行 `python scripts/rebuild_knowledge_index.py`，再启动后端。
 - 本阶段不引入 Docker Compose Qdrant 或 Redis；多实例和在线重建需求出现后迁移到 Qdrant Server/Cloud。
-- 已提供可选的真实 DeepSeek Agent RAG `off`/`on` A/B 测量脚本。2026-07-20 的 3 个案例结果为 `off 3/3`、`on 3/3`、持平，只证明当前小样本未回归，不代表准确率已经提升。
+- 已提供可选的真实 DeepSeek Agent RAG `off`/`on` A/B 测量脚本。最近一次真实运行持平，只证明当前小样本未回归，不代表准确率已经提升；带日期证据见[实施计划最终验证记录](superpowers/plans/2026-07-13-qdrant-local-rag.md#final-verification-record-2026-07-20)。
 - 声称效果提升前，应扩充能区分有无知识检索的业务知识与评测案例并重复测量；当前不需要为此新增向量服务、缓存或其他基础设施。
 
 ### 阶段二：MySQL 元数据库

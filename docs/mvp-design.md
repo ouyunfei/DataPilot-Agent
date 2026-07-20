@@ -297,7 +297,7 @@ Docker 提供 MySQL 示例库，首次启动自动创建三张业务表并初始
 - `pytest` 测试不访问真实 DeepSeek、Hugging Face 或 Qdrant Server
 - `python scripts/run_evals.py` 使用临时 SQLite、fake LLM 和 fake retriever 离线运行；确定性 Text-to-SQL 结果为 7/7，配对 RAG 部分只是合成 wiring smoke，不是质量基准
 - 可选的 `python scripts/run_rag_ab_eval.py` 需要配置真实 DeepSeek，并提前构建与当前 Embedding 配置兼容的 Qdrant Collection；它分别运行 RAG `off`/`on` 的真实 Agent，执行 SQL 并按参考结果评分，不进入 CI
-- 2026-07-20 本地验证：索引重建得到 `schema=258`、`metric=26`、`trusted_sql=2`、`historical_qa=0`、`total=286`；生产 Collection `datapilot_knowledge_bge_small_zh_v15` 为 286 points、512 维、Cosine，真实 BGE 对数据源 1 和 2 均返回非空隔离命中；真实 A/B 为 `off 3/3`、`on 3/3`、持平，只证明当前 3 个案例未回归，尚未证明质量提升
+- 最近一次真实运行结果持平，尚未证明质量提升；索引、检索与 A/B 的带日期证据见[实施计划最终验证记录](superpowers/plans/2026-07-13-qdrant-local-rag.md#final-verification-record-2026-07-20)
 
 ## 9. 示例业务问题覆盖
 

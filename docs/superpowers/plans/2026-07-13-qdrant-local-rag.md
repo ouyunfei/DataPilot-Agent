@@ -14,14 +14,17 @@
 
 ### Create
 
-- `app/services/knowledge.py`: concrete BGE embedder, Qdrant Local store, knowledge collectors, retrieval formatting.
+- `app/services/knowledge.py`: concrete BGE embedder, Qdrant Local store, knowledge collectors, retrieval formatting and fail-open Collection compatibility validation.
 - `scripts/rebuild_knowledge_index.py`: one-shot full Collection rebuild command.
+- `scripts/run_rag_ab_eval.py`: optional real DeepSeek Agent RAG off/on runner with runtime precondition checks and result-based scoring.
 - `tests/test_knowledge.py`: deterministic Fake Embedder and Qdrant Local tests.
+- `tests/test_rag_ab_eval.py`: deterministic tests for real A/B preconditions, database copying, counterexamples and result equivalence.
 
 ### Modify
 
 - `requirements.txt`: add the two required local RAG dependencies.
 - `.gitignore`: ignore `data/qdrant/`.
+- `.dockerignore`: exclude local databases and Qdrant persistence from the Docker build context.
 - `.env.example`: document the four required RAG settings.
 - `app/core/config.py`: load Qdrant path, Collection, model and Top-K settings.
 - `app/db/database.py`: persist RAG-eligible log fields, select liked successful QA, and expose internal full catalog reads without changing API defaults.
@@ -31,10 +34,12 @@
 - `app/api/routes.py`: map Agent knowledge sources into `ChatResponse`.
 - `tests/test_database.py`: cover log migration, historical QA selection and internal catalog permissions.
 - `tests/test_api.py`: cover knowledge prompt injection, API sources, fallback and SQL safety.
-- `tests/test_engineering_assets.py`: assert dependency, config and ignore assets.
-- `README.md`: installation, first model download, rebuild and Local Mode usage.
-- `docs/mvp-design.md`: update workflow and component design.
-- `docs/storage-architecture-roadmap.md`: mark phase-one Qdrant Local implementation details and server migration boundary.
+- `scripts/run_evals.py`: keep deterministic Text-to-SQL checks offline and label the fake LLM/retriever RAG comparison as synthetic wiring smoke.
+- `tests/test_engineering_assets.py`: assert dependency, config, Git/Docker ignore assets and deterministic eval labeling/diagnostics.
+- `README.md`: installation, first model download, rebuild, Local Mode usage and real A/B prerequisites.
+- `docs/mvp-design.md`: update workflow, component design and the separate deterministic/real eval roles.
+- `docs/storage-architecture-roadmap.md`: mark phase-one Qdrant Local implementation, measurement status and server migration boundary.
+- `docs/superpowers/plans/2026-07-13-qdrant-local-rag.md`: record checked closeout work and dated operational evidence.
 
 ### Explicitly Unchanged
 
@@ -1833,6 +1838,54 @@ git commit -m "fix: complete local rag verification"
 ```
 
 If no correction was required, do not create an empty commit.
+
+---
+
+### Task 10: Complete Real RAG Measurement and Operational Closeout
+
+**Files:**
+- Create: `scripts/run_rag_ab_eval.py`
+- Create: `tests/test_rag_ab_eval.py`
+- Modify: `.dockerignore`
+- Modify: `app/services/knowledge.py`
+- Modify: `scripts/run_evals.py`
+- Modify: `tests/test_engineering_assets.py`
+- Modify: `README.md`
+- Modify: `docs/mvp-design.md`
+- Modify: `docs/storage-architecture-roadmap.md`
+- Modify: `docs/superpowers/plans/2026-07-13-qdrant-local-rag.md`
+
+- [x] **Step 1: Validate Collection compatibility and Docker build exclusions**
+
+Before retrieval, inspect an existing Collection and return no knowledge when its vector configuration is not the fixed 512-dimensional Cosine configuration. Exclude `data/*.db` and `data/qdrant/` from the Docker build context, and cover these assets in engineering tests.
+
+- [x] **Step 2: Label the deterministic RAG comparison as synthetic wiring smoke**
+
+Keep `python scripts/run_evals.py` fully offline with a fake LLM and fake retriever, report its paired RAG check as synthetic, and test both the success output and case/arm failure diagnostics. Do not present this check as a real-model quality benchmark.
+
+- [x] **Step 3: Add the optional real DeepSeek Agent RAG A/B runner and tests**
+
+Validate the DeepSeek configuration, default database, default SQLite data source 1, Qdrant path, and a nonempty compatible Collection. Copy the default database into a temporary benchmark database, seed differentiating counterexamples, run complete Agent `off` and `on` arms, and score generated SQL execution results against reference results. Cover preconditions, database copying, counterexamples, result equivalence and SQL-only analysis behavior in `tests/test_rag_ab_eval.py`.
+
+- [x] **Step 4: Run a real BGE model and knowledge-index rebuild smoke**
+
+After PostgreSQL and MySQL were available, run `python scripts/rebuild_knowledge_index.py` with the real local model and confirm the resulting knowledge counts and Collection configuration.
+
+- [x] **Step 5: Run source-scoped real BGE retrieval smoke checks**
+
+Query the rebuilt Collection for data source 1 and data source 2 and confirm each returns nonempty hits restricted to the requested source.
+
+- [x] **Step 6: Run the real DeepSeek Agent RAG A/B benchmark**
+
+Run `python scripts/run_rag_ab_eval.py`, record both arm totals and the delta, and report a tie as no demonstrated quality improvement rather than a positive result.
+
+- [x] **Step 7: Stop Docker database containers after operational verification**
+
+Stop the PostgreSQL and MySQL verification containers so the repository is left without background database services.
+
+- [x] **Step 8: Synchronize closeout documentation**
+
+Document the two eval roles, full real-run prerequisites, current measurement conclusion and dated operational evidence without weakening SQL safety or data-source isolation requirements.
 
 ---
 
