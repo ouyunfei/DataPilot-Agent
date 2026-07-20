@@ -40,6 +40,7 @@ def test_docker_assets_exist_and_use_env_file():
     assert "qdrant-client==1.18.0" in requirements
     assert "sentence-transformers==5.6.0" in requirements
     assert ".env" in dockerignore
+    assert "data/qdrant/" in dockerignore
     assert "data/qdrant/" in gitignore
     assert "QDRANT_PATH=data/qdrant" in env_example
     assert "QDRANT_COLLECTION=datapilot_knowledge_bge_small_zh_v15" in env_example

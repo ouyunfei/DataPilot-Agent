@@ -341,6 +341,15 @@ class QdrantKnowledgeBase:
             try:
                 if not client.collection_exists(self.collection_name):
                     return []
+                vectors_config = client.get_collection(
+                    self.collection_name
+                ).config.params.vectors
+                if (
+                    not isinstance(vectors_config, models.VectorParams)
+                    or vectors_config.size != EMBEDDING_DIMENSION
+                    or vectors_config.distance != models.Distance.COSINE
+                ):
+                    return []
                 query_vector = _validated_vector(self.embedder.embed_query(question))
                 response = client.query_points(
                     collection_name=self.collection_name,

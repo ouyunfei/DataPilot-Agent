@@ -7,3 +7,4 @@ __pycache__/
 .github/
 .claude/
 data/*.db
+data/qdrant/

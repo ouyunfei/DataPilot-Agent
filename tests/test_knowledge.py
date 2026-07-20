@@ -7,7 +7,7 @@ import sys
 from types import ModuleType
 
 import pytest
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 
 from app.db.database import SQLiteDatabase
 import app.services.knowledge as knowledge_module
@@ -263,6 +263,57 @@ def test_missing_collection_does_not_call_query_embedder(tmp_path):
     path = tmp_path / "missing-collection"
     path.mkdir()
     knowledge = QdrantKnowledgeBase(path, "missing", embedder, top_k=5)
+
+    assert knowledge.search("销售额", data_source_id=1) == []
+    assert embedder.query_calls == 0
+
+
+def test_wrong_collection_vector_size_does_not_call_query_embedder(tmp_path):
+    path = tmp_path / "wrong-size"
+    client = QdrantClient(path=str(path))
+    client.create_collection(
+        collection_name="knowledge",
+        vectors_config=models.VectorParams(size=3, distance=models.Distance.COSINE),
+    )
+    client.close()
+    embedder = FakeEmbedder()
+    knowledge = QdrantKnowledgeBase(path, "knowledge", embedder, top_k=5)
+
+    assert knowledge.search("销售额", data_source_id=1) == []
+    assert embedder.query_calls == 0
+
+
+def test_wrong_collection_distance_does_not_call_query_embedder(tmp_path):
+    path = tmp_path / "wrong-distance"
+    client = QdrantClient(path=str(path))
+    client.create_collection(
+        collection_name="knowledge",
+        vectors_config=models.VectorParams(
+            size=EMBEDDING_DIMENSION, distance=models.Distance.DOT
+        ),
+    )
+    client.close()
+    embedder = FakeEmbedder()
+    knowledge = QdrantKnowledgeBase(path, "knowledge", embedder, top_k=5)
+
+    assert knowledge.search("销售额", data_source_id=1) == []
+    assert embedder.query_calls == 0
+
+
+def test_named_collection_vectors_do_not_call_query_embedder(tmp_path):
+    path = tmp_path / "named-vectors"
+    client = QdrantClient(path=str(path))
+    client.create_collection(
+        collection_name="knowledge",
+        vectors_config={
+            "default": models.VectorParams(
+                size=EMBEDDING_DIMENSION, distance=models.Distance.COSINE
+            )
+        },
+    )
+    client.close()
+    embedder = FakeEmbedder()
+    knowledge = QdrantKnowledgeBase(path, "knowledge", embedder, top_k=5)
 
     assert knowledge.search("销售额", data_source_id=1) == []
     assert embedder.query_calls == 0
