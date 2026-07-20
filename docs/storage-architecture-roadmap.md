@@ -119,7 +119,7 @@ PostgreSQL 不再作为默认运行依赖。可以先保留适配器和测试，
 
 ### 阶段二：MySQL 元数据库
 
-- 已实现兼容切换：默认仍用 SQLite；配置 `META_DB_TYPE=mysql` 和 `META_DATABASE_URL` 后，平台元数据读写进入 MySQL。
+- 已实现兼容切换：默认运行已切到 MySQL；SQLite 仍保留为回滚和测试路径。
 - MySQL 库需先手动创建；当前目标库名为 `datapilot`。
 - 已提供 `scripts/migrate_sqlite_meta_to_mysql.py`，只迁移 `data_sources`、`metrics`、`query_logs`、`chat_sessions`、`chat_messages`。
 - 本阶段不迁移 `orders/users/products` 业务表，不删除 SQLite 代码，保留回滚路径。
@@ -128,7 +128,7 @@ PostgreSQL 不再作为默认运行依赖。可以先保留适配器和测试，
 ### 阶段三：收敛关系型数据库
 
 - 删除 SQLite 运行依赖和兼容代码。
-- 将 MySQL 设为默认数据源与平台元数据库。
+- 继续保持 MySQL 作为默认数据源与平台元数据库。
 - PostgreSQL 改为可选能力，或在确认无需求后完全删除。
 - 关系型存储收敛完成后再根据实际部署需求调整 Docker 默认服务，不预设 Qdrant 容器。
 

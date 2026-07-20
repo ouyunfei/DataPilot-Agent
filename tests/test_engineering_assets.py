@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -46,8 +47,35 @@ def test_docker_assets_exist_and_use_env_file():
     assert "QDRANT_COLLECTION=datapilot_knowledge_bge_small_zh_v15" in env_example
     assert "EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5" in env_example
     assert "KNOWLEDGE_TOP_K=5" in env_example
-    assert "META_DB_TYPE=sqlite" in env_example
-    assert "META_DATABASE_URL=" in env_example
+    assert "META_DB_TYPE=mysql" in env_example
+    assert "META_DATABASE_URL=mysql://user:password@localhost:3306/datapilot" in env_example
+
+
+def test_config_defaults_to_mysql_in_clean_environment(tmp_path):
+    script = """
+import json
+from app.core.config import META_DATABASE_URL, META_DB_TYPE
+print(json.dumps({
+    "meta_db_type": META_DB_TYPE,
+    "meta_database_url": META_DATABASE_URL,
+}))
+"""
+    env = {key: value for key, value in os.environ.items() if key not in {"META_DB_TYPE", "META_DATABASE_URL"}}
+    env["PYTHONPATH"] = str(ROOT)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout.strip())
+    assert payload["meta_db_type"] == "mysql"
+    assert payload["meta_database_url"] == "mysql://root:0522@127.0.0.1:3306/datapilot"
 
 
 def test_ci_runs_pytest_without_deepseek_secret():

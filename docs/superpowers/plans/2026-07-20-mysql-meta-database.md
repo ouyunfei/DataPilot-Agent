@@ -41,7 +41,7 @@
 
 - [x] **Step 1: Write failing config/backend tests**
 
-Add tests that assert `.env.example` contains `META_DB_TYPE=sqlite` and `META_DATABASE_URL=`, and that `create_app()` constructs `MySQLMetaDatabase` when `app.main.META_DB_TYPE == "mysql"`.
+Add tests that assert `.env.example` contains `META_DB_TYPE=mysql` and a MySQL connection URL placeholder, and that `create_app()` constructs `MySQLMetaDatabase` when `app.main.META_DB_TYPE == "mysql"`.
 
 - [x] **Step 2: Verify tests fail**
 
@@ -55,7 +55,7 @@ Expected: FAIL because the config and class do not exist.
 
 - [x] **Step 3: Implement minimal config and backend selection**
 
-Add config constants, a `_create_database()` helper in `app/main.py`, and select `MySQLMetaDatabase` only for `META_DB_TYPE=mysql`. Keep SQLite as default.
+Add config constants, a `_create_database()` helper in `app/main.py`, and select `MySQLMetaDatabase` only for `META_DB_TYPE=mysql`. 默认运行现在走 MySQL；SQLite 只保留给测试和回滚。
 
 - [x] **Step 4: Verify focused tests pass**
 
@@ -163,8 +163,6 @@ git commit -m "feat: migrate sqlite metadata to mysql"
 Document:
 
 ```env
-META_DB_TYPE=sqlite
-META_DATABASE_URL=
 META_DB_TYPE=mysql
 META_DATABASE_URL=mysql://user:password@localhost:3306/datapilot
 ```

@@ -20,5 +20,8 @@ QDRANT_PATH = _qdrant_path if _qdrant_path.is_absolute() else BASE_DIR / _qdrant
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "datapilot_knowledge_bge_small_zh_v15")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
 KNOWLEDGE_TOP_K = max(1, int(os.getenv("KNOWLEDGE_TOP_K", "5")))
-META_DB_TYPE = os.getenv("META_DB_TYPE", "sqlite").strip().lower()
-META_DATABASE_URL = os.getenv("META_DATABASE_URL", "").strip()
+META_DB_TYPE = os.getenv("META_DB_TYPE", "mysql").strip().lower()
+META_DATABASE_URL = os.getenv(
+    "META_DATABASE_URL",
+    "mysql://root:0522@127.0.0.1:3306/datapilot",
+).strip()

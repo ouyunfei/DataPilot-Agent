@@ -182,8 +182,8 @@ QDRANT_PATH=data/qdrant
 QDRANT_COLLECTION=datapilot_knowledge_bge_small_zh_v15
 EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 KNOWLEDGE_TOP_K=5
-META_DB_TYPE=sqlite
-META_DATABASE_URL=
+META_DB_TYPE=mysql
+META_DATABASE_URL=mysql://user:password@localhost:3306/datapilot
 ```
 
 启动服务：
@@ -199,7 +199,7 @@ uvicorn app.main:app --reload
 
 ## MySQL 元数据库
 
-默认 `META_DB_TYPE=sqlite`，平台配置、指标、日志、反馈和会话继续写入 `data/datapilot.db`。
+默认 `META_DB_TYPE=mysql`，平台配置、指标、日志、反馈和会话写入本地 MySQL；SQLite 仅保留为兼容回滚和单测路径。
 
 切到 MySQL 前先创建库；脚本不会自动建库：
 
@@ -216,6 +216,7 @@ META_DATABASE_URL=mysql://user:password@localhost:3306/datapilot
 
 启动后 5 张平台表会在 MySQL 中初始化：`data_sources`、`metrics`、`query_logs`、`chat_sessions`、`chat_messages`。本阶段只迁移平台元数据，不迁移 `orders/users/products` 业务表，也不删除 SQLite 回滚路径。
 默认数据源会指向 Docker MySQL 示例库 `default_mysql`，业务查询仍只允许 `SELECT`。
+pytest 仍默认走 sqlite 快速单测；MySQL 默认配置另有烟测覆盖。
 
 一次性迁移：
 
