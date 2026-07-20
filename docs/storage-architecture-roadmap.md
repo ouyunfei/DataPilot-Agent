@@ -114,6 +114,8 @@ PostgreSQL 不再作为默认运行依赖。可以先保留适配器和测试，
 - 在 LangGraph 中使用 `retrieve_knowledge` 节点；无目录、无 Collection、无结果或检索/模型异常时 fail-open 回退原流程。
 - 重建前停止后端，运行 `python scripts/rebuild_knowledge_index.py`，再启动后端。
 - 本阶段不引入 Docker Compose Qdrant 或 Redis；多实例和在线重建需求出现后迁移到 Qdrant Server/Cloud。
+- 已提供可选的真实 DeepSeek Agent RAG `off`/`on` A/B 测量脚本。2026-07-20 的 3 个案例结果为 `off 3/3`、`on 3/3`、持平，只证明当前小样本未回归，不代表准确率已经提升。
+- 声称效果提升前，应扩充能区分有无知识检索的业务知识与评测案例并重复测量；当前不需要为此新增向量服务、缓存或其他基础设施。
 
 ### 阶段二：MySQL 元数据库
 
@@ -153,6 +155,6 @@ PostgreSQL 不再作为默认运行依赖。可以先保留适配器和测试，
 
 - 默认部署只包含职责清晰且必要的存储组件。
 - MySQL 是平台配置、日志、会话和业务数据的持久化事实来源。
-- Qdrant 检索严格按数据源隔离，并能通过 eval 证明效果提升。
+- Qdrant 检索严格按数据源隔离，并具备可重复的真实 Agent RAG `off`/`on` 测量能力；准确率提升必须由扩展后的差异化知识和评测案例实证，当前不作此结论。
 - Redis 可以随时清空或停用，不影响系统数据完整性和核心查询能力。
 - SQLite 与 PostgreSQL 的移除不会破坏现有 API、安全策略和测试。

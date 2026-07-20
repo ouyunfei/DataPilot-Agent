@@ -1,6 +1,6 @@
 # Qdrant Local RAG Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use Markdown task-list syntax for tracking.
 
 **Goal:** Add a local, data-source-isolated Qdrant RAG stage using `BAAI/bge-small-zh-v1.5`, inject recalled knowledge before SQL generation, and preserve the existing safe fallback path.
 
@@ -54,7 +54,7 @@
 - Modify: `app/core/config.py:1-12`
 - Modify: `tests/test_engineering_assets.py:10-36`
 
-- [ ] **Step 1: Write the failing engineering-assets assertions**
+- [x] **Step 1: Write the failing engineering-assets assertions**
 
 Extend `test_docker_assets_exist_and_use_env_file()` with exact assertions:
 
@@ -73,7 +73,7 @@ Extend `test_docker_assets_exist_and_use_env_file()` with exact assertions:
     assert "qdrant:" not in compose
 ```
 
-- [ ] **Step 2: Run the focused test and verify failure**
+- [x] **Step 2: Run the focused test and verify failure**
 
 Run:
 
@@ -83,7 +83,7 @@ python -m pytest tests/test_engineering_assets.py::test_docker_assets_exist_and_
 
 Expected: FAIL because the dependencies, ignore rule and environment settings do not exist.
 
-- [ ] **Step 3: Add the required dependencies**
+- [x] **Step 3: Add the required dependencies**
 
 Append to `requirements.txt`:
 
@@ -92,7 +92,7 @@ qdrant-client==1.18.0
 sentence-transformers==5.6.0
 ```
 
-- [ ] **Step 4: Ignore Qdrant Local persistence**
+- [x] **Step 4: Ignore Qdrant Local persistence**
 
 Append to `.gitignore`:
 
@@ -100,7 +100,7 @@ Append to `.gitignore`:
 data/qdrant/
 ```
 
-- [ ] **Step 5: Add the four documented settings**
+- [x] **Step 5: Add the four documented settings**
 
 Append to `.env.example`:
 
@@ -111,7 +111,7 @@ EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 KNOWLEDGE_TOP_K=5
 ```
 
-- [ ] **Step 6: Load settings using the existing module style**
+- [x] **Step 6: Load settings using the existing module style**
 
 Add to `app/core/config.py` after the current constants:
 
@@ -126,7 +126,7 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
 KNOWLEDGE_TOP_K = max(1, int(os.getenv("KNOWLEDGE_TOP_K", "5")))
 ```
 
-- [ ] **Step 7: Install the pinned dependencies**
+- [x] **Step 7: Install the pinned dependencies**
 
 Run:
 
@@ -136,7 +136,7 @@ python -m pip install -r requirements.txt
 
 Expected: command exits 0 and installs `qdrant-client==1.18.0` and `sentence-transformers==5.6.0` without downloading the BGE model.
 
-- [ ] **Step 8: Run the focused test**
+- [x] **Step 8: Run the focused test**
 
 Run:
 
@@ -146,7 +146,7 @@ python -m pytest tests/test_engineering_assets.py::test_docker_assets_exist_and_
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit the task**
+- [x] **Step 9: Commit the task**
 
 ```bash
 git add requirements.txt .gitignore .env.example app/core/config.py tests/test_engineering_assets.py
@@ -161,7 +161,7 @@ git commit -m "build: add local rag dependencies"
 - Modify: `app/db/database.py:249-371,981-1039`
 - Modify: `tests/test_database.py:54-90`
 
-- [ ] **Step 1: Write failing database tests**
+- [x] **Step 1: Write failing database tests**
 
 Add to `tests/test_database.py`:
 
@@ -241,7 +241,7 @@ def test_database_skips_history_without_data_source_or_answer(tmp_path):
     assert db.list_high_quality_historical_qa(source_id) == []
 ```
 
-- [ ] **Step 2: Run the tests and verify failure**
+- [x] **Step 2: Run the tests and verify failure**
 
 Run:
 
@@ -251,7 +251,7 @@ python -m pytest tests/test_database.py::test_database_selects_only_liked_succes
 
 Expected: FAIL because `log_query()` lacks the new arguments and `list_high_quality_historical_qa()` does not exist.
 
-- [ ] **Step 3: Extend the query-log schema compatibly**
+- [x] **Step 3: Extend the query-log schema compatibly**
 
 In the initial `CREATE TABLE IF NOT EXISTS query_logs` statement add:
 
@@ -276,7 +276,7 @@ After the existing migration checks add:
             )
 ```
 
-- [ ] **Step 4: Extend `log_query()` without breaking existing callers**
+- [x] **Step 4: Extend `log_query()` without breaking existing callers**
 
 Change the signature to:
 
@@ -325,7 +325,7 @@ Change the insert to:
             )
 ```
 
-- [ ] **Step 5: Add the high-quality history selector**
+- [x] **Step 5: Add the high-quality history selector**
 
 Add after `update_query_feedback()`:
 
@@ -352,7 +352,7 @@ Add after `update_query_feedback()`:
         return [dict(row) for row in rows]
 ```
 
-- [ ] **Step 6: Run database tests**
+- [x] **Step 6: Run database tests**
 
 Run:
 
@@ -362,7 +362,7 @@ python -m pytest tests/test_database.py -q
 
 Expected: all database tests PASS.
 
-- [ ] **Step 7: Commit the task**
+- [x] **Step 7: Commit the task**
 
 ```bash
 git add app/db/database.py tests/test_database.py
@@ -377,7 +377,7 @@ git commit -m "feat: persist rag history metadata"
 - Modify: `app/db/database.py:788-879`
 - Modify: `tests/test_database.py`
 
-- [ ] **Step 1: Write the failing internal-catalog test**
+- [x] **Step 1: Write the failing internal-catalog test**
 
 Add:
 
@@ -409,7 +409,7 @@ def test_database_catalog_can_include_non_queryable_schema(tmp_path):
     assert all(column["queryable"] is False for column in hidden_columns)
 ```
 
-- [ ] **Step 2: Run the focused test and verify failure**
+- [x] **Step 2: Run the focused test and verify failure**
 
 Run:
 
@@ -419,7 +419,7 @@ python -m pytest tests/test_database.py::test_database_catalog_can_include_non_q
 
 Expected: FAIL because the methods do not accept `include_non_queryable`.
 
-- [ ] **Step 3: Extend table catalog reads with a default-off flag**
+- [x] **Step 3: Extend table catalog reads with a default-off flag**
 
 Change the signature:
 
@@ -453,7 +453,7 @@ For SQLite, return all known business tables only when requested:
         ]
 ```
 
-- [ ] **Step 4: Extend column catalog reads with the same default-off flag**
+- [x] **Step 4: Extend column catalog reads with the same default-off flag**
 
 Change the signature:
 
@@ -486,7 +486,7 @@ Set the allowed set only for an allowed table:
 
 Existing response construction remains unchanged because membership in `allowed` now correctly produces `queryable=false` for hidden tables and columns.
 
-- [ ] **Step 5: Run API and database catalog tests**
+- [x] **Step 5: Run API and database catalog tests**
 
 Run:
 
@@ -496,7 +496,7 @@ python -m pytest tests/test_database.py tests/test_api.py -q
 
 Expected: all tests PASS; existing API calls retain their default filtered behavior.
 
-- [ ] **Step 6: Commit the task**
+- [x] **Step 6: Commit the task**
 
 ```bash
 git add app/db/database.py tests/test_database.py
@@ -511,7 +511,7 @@ git commit -m "feat: expose catalog metadata for indexing"
 - Create: `app/services/knowledge.py`
 - Create: `tests/test_knowledge.py`
 
-- [ ] **Step 1: Write deterministic Qdrant Local tests**
+- [x] **Step 1: Write deterministic Qdrant Local tests**
 
 Create `tests/test_knowledge.py` with the initial tests and Fake Embedder:
 
@@ -638,7 +638,7 @@ def test_knowledge_payload_contains_only_safe_metadata():
     assert "vector" not in document.payload
 ```
 
-- [ ] **Step 2: Run the new tests and verify failure**
+- [x] **Step 2: Run the new tests and verify failure**
 
 Run:
 
@@ -648,7 +648,7 @@ python -m pytest tests/test_knowledge.py -q
 
 Expected: collection error because `app.services.knowledge` does not exist.
 
-- [ ] **Step 3: Implement the knowledge data model and fixed BGE embedder**
+- [x] **Step 3: Implement the knowledge data model and fixed BGE embedder**
 
 Create `app/services/knowledge.py` with:
 
@@ -755,7 +755,7 @@ def _validated_vector(vector: Any) -> list[float]:
     return [float(value) for value in values]
 ```
 
-- [ ] **Step 4: Implement Qdrant rebuild, filtered search and prompt formatting**
+- [x] **Step 4: Implement Qdrant rebuild, filtered search and prompt formatting**
 
 Append:
 
@@ -892,7 +892,7 @@ class QdrantKnowledgeBase:
         return context, sources
 ```
 
-- [ ] **Step 5: Run the Qdrant Local tests**
+- [x] **Step 5: Run the Qdrant Local tests**
 
 Run:
 
@@ -902,7 +902,7 @@ python -m pytest tests/test_knowledge.py -q
 
 Expected: all current knowledge tests PASS without a model download or Qdrant Server.
 
-- [ ] **Step 6: Commit the task**
+- [x] **Step 6: Commit the task**
 
 ```bash
 git add app/services/knowledge.py tests/test_knowledge.py
@@ -918,7 +918,7 @@ git commit -m "feat: add qdrant local knowledge service"
 - Modify: `tests/test_knowledge.py`
 - Create: `scripts/rebuild_knowledge_index.py`
 
-- [ ] **Step 1: Write failing collector tests**
+- [x] **Step 1: Write failing collector tests**
 
 Append to `tests/test_knowledge.py`:
 
@@ -981,7 +981,7 @@ def test_non_queryable_schema_is_indexed_but_marked_false(tmp_path):
     assert next(document for document in documents if document.source_id == "column:orders.status").queryable is False
 ```
 
-- [ ] **Step 2: Run collector tests and verify failure**
+- [x] **Step 2: Run collector tests and verify failure**
 
 Run:
 
@@ -991,7 +991,7 @@ python -m pytest tests/test_knowledge.py::test_collects_schema_metric_trusted_sq
 
 Expected: FAIL because `collect_knowledge_documents()` does not exist.
 
-- [ ] **Step 3: Implement Schema and metric collection**
+- [x] **Step 3: Implement Schema and metric collection**
 
 Add imports to `app/services/knowledge.py`:
 
@@ -1087,7 +1087,7 @@ def collect_knowledge_documents(db: SQLiteDatabase) -> list[KnowledgeDocument]:
     return documents
 ```
 
-- [ ] **Step 4: Implement trusted SQL and historical QA collection**
+- [x] **Step 4: Implement trusted SQL and historical QA collection**
 
 Append:
 
@@ -1164,7 +1164,7 @@ def _sql_references(sql: str, dialect: str) -> tuple[list[str], list[str]]:
     return tables, columns
 ```
 
-- [ ] **Step 5: Create the rebuild script**
+- [x] **Step 5: Create the rebuild script**
 
 Create `scripts/rebuild_knowledge_index.py`:
 
@@ -1223,7 +1223,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 6: Run knowledge and database tests**
+- [x] **Step 6: Run knowledge and database tests**
 
 Run:
 
@@ -1233,7 +1233,7 @@ python -m pytest tests/test_knowledge.py tests/test_database.py -q
 
 Expected: PASS without network access.
 
-- [ ] **Step 7: Commit the task**
+- [x] **Step 7: Commit the task**
 
 ```bash
 git add app/services/knowledge.py scripts/rebuild_knowledge_index.py tests/test_knowledge.py
@@ -1251,7 +1251,7 @@ git commit -m "feat: build local rag knowledge index"
 - Modify: `app/api/routes.py:25-53`
 - Modify: `tests/test_api.py`
 
-- [ ] **Step 1: Add Fake Retriever and failing API test**
+- [x] **Step 1: Add Fake Retriever and failing API test**
 
 Add near the existing fake clients in `tests/test_api.py`:
 
@@ -1307,7 +1307,7 @@ def test_chat_injects_knowledge_and_returns_sources(tmp_path):
     assert retriever.calls == [("请按商品统计销售额排名", payload["data_source_id"])]
 ```
 
-- [ ] **Step 2: Run the focused test and verify failure**
+- [x] **Step 2: Run the focused test and verify failure**
 
 Run:
 
@@ -1317,7 +1317,7 @@ python -m pytest tests/test_api.py::test_chat_injects_knowledge_and_returns_sour
 
 Expected: FAIL because `create_app()` does not accept `knowledge` and the API model lacks `knowledge_sources`.
 
-- [ ] **Step 3: Add the response model**
+- [x] **Step 3: Add the response model**
 
 In `app/schemas/chat.py`, add before `ChatResponse`:
 
@@ -1335,7 +1335,7 @@ Add to `ChatResponse`:
     knowledge_sources: list[KnowledgeSourceItem] = Field(default_factory=list)
 ```
 
-- [ ] **Step 4: Add the retrieval node and State fields**
+- [x] **Step 4: Add the retrieval node and State fields**
 
 In `app/agent/workflow.py` add:
 
@@ -1411,7 +1411,7 @@ Add the node method:
         return {"knowledge_context": context, "knowledge_sources": sources}
 ```
 
-- [ ] **Step 5: Inject knowledge into the existing SQL prompt**
+- [x] **Step 5: Inject knowledge into the existing SQL prompt**
 
 In `_generate_sql()` construct the context without changing the LLM interface:
 
@@ -1427,7 +1427,7 @@ In `_generate_sql()` construct the context without changing the LLM interface:
             )
 ```
 
-- [ ] **Step 6: Write complete log metadata**
+- [x] **Step 6: Write complete log metadata**
 
 Extend the successful `self.db.log_query()` call in `run()`:
 
@@ -1439,7 +1439,7 @@ Extend the successful `self.db.log_query()` call in `run()`:
 
 For the missing-data-source log, pass `data_source_id=data_source_id` and leave answer fields at defaults.
 
-- [ ] **Step 7: Construct the production knowledge service lazily**
+- [x] **Step 7: Construct the production knowledge service lazily**
 
 In `app/main.py` import:
 
@@ -1486,7 +1486,7 @@ Before constructing the Agent:
 
 `BGEEmbedder` construction validates the fixed name but does not load or download the model. An unsupported configured model disables retrieval without preventing FastAPI startup.
 
-- [ ] **Step 8: Map sources into the response**
+- [x] **Step 8: Map sources into the response**
 
 In `app/api/routes.py` add:
 
@@ -1496,7 +1496,7 @@ In `app/api/routes.py` add:
 
 to the `ChatResponse` constructor.
 
-- [ ] **Step 9: Run API tests**
+- [x] **Step 9: Run API tests**
 
 Run:
 
@@ -1506,7 +1506,7 @@ python -m pytest tests/test_api.py -q
 
 Expected: all API tests PASS and existing response fields remain unchanged.
 
-- [ ] **Step 10: Commit the task**
+- [x] **Step 10: Commit the task**
 
 ```bash
 git add app/main.py app/agent/workflow.py app/schemas/chat.py app/api/routes.py tests/test_api.py
@@ -1521,7 +1521,7 @@ git commit -m "feat: retrieve knowledge before sql generation"
 - Modify: `tests/test_api.py`
 - Modify: `tests/test_knowledge.py`
 
-- [ ] **Step 1: Add the fail-open API test**
+- [x] **Step 1: Add the fail-open API test**
 
 Add:
 
@@ -1544,7 +1544,7 @@ def test_chat_falls_back_when_knowledge_retrieval_fails(tmp_path):
     assert "C:/secret/qdrant" not in response.text
 ```
 
-- [ ] **Step 2: Add a knowledge-driven unsafe LLM and safety test**
+- [x] **Step 2: Add a knowledge-driven unsafe LLM and safety test**
 
 Add:
 
@@ -1592,7 +1592,7 @@ def test_retrieved_sql_still_passes_sql_safety_validation(tmp_path):
     assert "只允许执行 SELECT" in payload["error"]
 ```
 
-- [ ] **Step 3: Add context and payload minimization tests**
+- [x] **Step 3: Add context and payload minimization tests**
 
 Append to `tests/test_knowledge.py`:
 
@@ -1625,7 +1625,7 @@ def test_retrieve_limits_context_and_hides_content_from_sources(tmp_path):
     assert all("vector" not in source for source in sources)
 ```
 
-- [ ] **Step 4: Run focused security and fallback tests**
+- [x] **Step 4: Run focused security and fallback tests**
 
 Run:
 
@@ -1635,7 +1635,7 @@ python -m pytest tests/test_api.py::test_chat_falls_back_when_knowledge_retrieva
 
 Expected: PASS.
 
-- [ ] **Step 5: Run the full test suite before documentation**
+- [x] **Step 5: Run the full test suite before documentation**
 
 Run:
 
@@ -1645,7 +1645,7 @@ python -m pytest -q
 
 Expected: all tests PASS without DeepSeek, Hugging Face network or Qdrant Server.
 
-- [ ] **Step 6: Commit the task**
+- [x] **Step 6: Commit the task**
 
 ```bash
 git add tests/test_api.py tests/test_knowledge.py
@@ -1661,7 +1661,7 @@ git commit -m "test: cover rag fallback and sql safety"
 - Modify: `docs/mvp-design.md`
 - Modify: `docs/storage-architecture-roadmap.md`
 
-- [ ] **Step 1: Update README features and workflow**
+- [x] **Step 1: Update README features and workflow**
 
 Add to the feature list:
 
@@ -1678,7 +1678,7 @@ retrieve_schema -> retrieve_knowledge -> generate_sql -> validate_sql -> execute
 
 Document `knowledge_sources` in the response example.
 
-- [ ] **Step 2: Add installation and rebuild instructions**
+- [x] **Step 2: Add installation and rebuild instructions**
 
 Add a `本地 RAG` section containing these exact operational facts:
 
@@ -1707,7 +1707,7 @@ Qdrant Local 同一目录不能被多个进程同时打开。重建索引前先�
 清理 Collection 时停止后端并删除 `data/qdrant/`，然后重新运行重建脚本。
 ```
 
-- [ ] **Step 3: Update the MVP design**
+- [x] **Step 3: Update the MVP design**
 
 In `docs/mvp-design.md`:
 
@@ -1718,7 +1718,7 @@ In `docs/mvp-design.md`:
 
 Preserve the user's existing uncommitted roadmap edits and merge changes rather than replacing the file.
 
-- [ ] **Step 4: Update the storage roadmap**
+- [x] **Step 4: Update the storage roadmap**
 
 In `docs/storage-architecture-roadmap.md`, update phase one with:
 
@@ -1729,7 +1729,7 @@ In `docs/storage-architecture-roadmap.md`, update phase one with:
 - Local Mode 需要停机重建；多实例和在线维护时迁移 Qdrant Server。
 ```
 
-- [ ] **Step 5: Check documentation and whitespace**
+- [x] **Step 5: Check documentation and whitespace**
 
 Run:
 
@@ -1739,7 +1739,7 @@ git diff --check
 
 Expected: no output.
 
-- [ ] **Step 6: Commit only implementation documentation changes**
+- [x] **Step 6: Commit only implementation documentation changes**
 
 Before committing, inspect `git diff -- docs/mvp-design.md docs/storage-architecture-roadmap.md` and ensure existing user-authored content remains. Then run:
 
@@ -1756,7 +1756,7 @@ git commit -m "docs: document qdrant local rag"
 - Verify all changed files
 - No new implementation files unless a failing check identifies a required fix
 
-- [ ] **Step 1: Run the complete pytest suite**
+- [x] **Step 1: Run the complete pytest suite**
 
 Run:
 
@@ -1766,7 +1766,7 @@ python -m pytest -q
 
 Expected: all tests PASS.
 
-- [ ] **Step 2: Run deterministic Text-to-SQL evals**
+- [x] **Step 2: Run deterministic Text-to-SQL evals**
 
 Run:
 
@@ -1781,7 +1781,7 @@ Eval passed: 7/7
 Success rate: 100.00%
 ```
 
-- [ ] **Step 3: Check repository whitespace**
+- [x] **Step 3: Check repository whitespace**
 
 Run:
 
@@ -1791,7 +1791,7 @@ git diff --check
 
 Expected: no output.
 
-- [ ] **Step 4: Verify no forbidden deployment changes**
+- [x] **Step 4: Verify no forbidden deployment changes**
 
 Run:
 
@@ -1801,7 +1801,7 @@ git diff origin/main...HEAD -- docker-compose.yml Dockerfile
 
 Expected: no Qdrant service and no unnecessary Docker changes.
 
-- [ ] **Step 5: Verify no sensitive or generated files are tracked**
+- [x] **Step 5: Verify no sensitive or generated files are tracked**
 
 Run:
 
@@ -1812,7 +1812,7 @@ git ls-files data .env
 
 Expected: clean status, and `data/qdrant/`, `data/*.db` and `.env` are not tracked.
 
-- [ ] **Step 6: Inspect the final diff summary**
+- [x] **Step 6: Inspect the final diff summary**
 
 Run:
 
@@ -1823,7 +1823,7 @@ git log --oneline --decorate -10
 
 Confirm the implementation contains no generic vector database factory, no background task, no frontend, no Redis/Celery and no Qdrant Server.
 
-- [ ] **Step 7: Create a final fix commit only if verification required changes**
+- [x] **Step 7: Create a final fix commit only if verification required changes**
 
 If a verification command required a code correction, rerun all checks and commit only that correction:
 
@@ -1833,3 +1833,15 @@ git commit -m "fix: complete local rag verification"
 ```
 
 If no correction was required, do not create an empty commit.
+
+---
+
+## Final Verification Record (2026-07-20)
+
+- Current implementation includes fixed local `BAAI/bge-small-zh-v1.5` embeddings, a 512-dimensional Cosine Qdrant Local Collection, four knowledge types, `data_source_id` plus `queryable=true` filtering, retrieval before SQL generation, fail-open retrieval, unchanged fail-closed SQL safety, index rebuild tooling and a real Agent RAG A/B runner.
+- A real `python scripts/rebuild_knowledge_index.py` run succeeded after PostgreSQL and MySQL were available: `schema=258`, `metric=26`, `trusted_sql=2`, `historical_qa=0`, `total=286`.
+- Production Collection `datapilot_knowledge_bge_small_zh_v15` contained 286 points with 512-dimensional vectors and Cosine distance.
+- Real BGE retrieval smoke checks returned nonempty source-scoped hits for data source 1 and data source 2.
+- Real `python scripts/run_rag_ab_eval.py` result: `off 3/3`, `on 3/3`, `Delta: tie`. This demonstrates no regression on the current three-case benchmark; it does not demonstrate a quality improvement.
+- Deterministic eval remained 7/7. Its paired RAG check uses a fake LLM and fake retriever and is only a synthetic workflow wiring smoke, not a quality benchmark.
+- Docker database containers were stopped after verification.
