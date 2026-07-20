@@ -104,7 +104,7 @@ CASES = [
         "label_field": "category",
         "metric_field": "refund_rate",
         "metric_aliases": {"refund_rate", "rate"},
-        "metric_tolerance": 0.000001,
+        "metric_tolerance": 0.0001,
         "required_tables": {"orders"},
         "required_columns": {"category", "refund_amount", "status"},
         "required_literals": {"refunded", "0"},

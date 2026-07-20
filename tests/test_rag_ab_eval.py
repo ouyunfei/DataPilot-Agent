@@ -144,6 +144,35 @@ def test_case_failures_rejects_wrong_row_count_and_ambiguous_metric():
     assert "primary metric is missing or ambiguous" in failures
 
 
+def test_refund_rate_tolerance_accepts_unrounded_equivalent_but_rejects_wrong_rate():
+    case = next(item for item in rag_ab.CASES if item["id"] == "category_refund_rate")
+    expected_rows = [{"category": "A", "refund_rate": round(4 / 66, 4)}]
+
+    equivalent_failures = rag_ab._case_failures(
+        case,
+        {
+            "sql": case["reference_sql"],
+            "data": [{"category": "A", "rate": 4 / 66}],
+            "error": None,
+        },
+        require_knowledge=False,
+        expected_rows=expected_rows,
+    )
+    wrong_failures = rag_ab._case_failures(
+        case,
+        {
+            "sql": case["reference_sql"],
+            "data": [{"category": "A", "rate": 0.061}],
+            "error": None,
+        },
+        require_knowledge=False,
+        expected_rows=expected_rows,
+    )
+
+    assert "primary metric differs from reference" not in equivalent_failures
+    assert "primary metric differs from reference" in wrong_failures
+
+
 def test_reference_rows_executes_each_reference_query_once():
     calls = []
 
