@@ -537,6 +537,46 @@ def test_collects_queryability_for_all_sqlite_schema_objects(tmp_path):
     assert "可查询：是" in documents["column:orders.amount"].content
 
 
+def test_collects_schema_from_whitelist_when_external_catalog_is_unavailable(
+    tmp_path, monkeypatch
+):
+    db = SQLiteDatabase(tmp_path / "knowledge.db")
+    db.initialize()
+    source = db.create_data_source(
+        name="unreachable_mysql",
+        db_type="mysql",
+        database_url="mysql://user:secret@127.0.0.1:3307/datapilot",
+        allowed_tables=["orders"],
+        allowed_columns={"orders": ["id", "amount"]},
+    )
+    original_list_catalog_tables = db.list_catalog_tables
+
+    def list_catalog_tables(data_source_id=None, include_non_queryable=False):
+        if data_source_id == source["id"]:
+            raise RuntimeError("mysql://user:secret@127.0.0.1:3307/datapilot")
+        return original_list_catalog_tables(data_source_id, include_non_queryable)
+
+    monkeypatch.setattr(db, "list_catalog_tables", list_catalog_tables)
+
+    documents = [
+        document
+        for document in knowledge_module.collect_knowledge_documents(db)
+        if document.data_source_id == source["id"]
+    ]
+    by_source_id = {document.source_id: document for document in documents}
+
+    assert by_source_id["table:orders"].queryable is True
+    assert by_source_id["column:orders.amount"].queryable is True
+    assert by_source_id["column:orders.status"].queryable is False
+    assert "类型：unknown" in by_source_id["column:orders.amount"].content
+    assert any(document.knowledge_type == "metric" for document in documents)
+    for document in documents:
+        assert "mysql://user:secret@127.0.0.1:3307/datapilot" not in document.content
+        assert "mysql://user:secret@127.0.0.1:3307/datapilot" not in repr(
+            document.payload
+        )
+
+
 def test_skips_metric_without_source_ownership_for_custom_sqlite(tmp_path):
     db = SQLiteDatabase(tmp_path / "knowledge.db")
     db.initialize()

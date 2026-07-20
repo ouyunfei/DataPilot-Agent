@@ -14,7 +14,7 @@ from qdrant_client import QdrantClient, models
 import sqlglot
 from sqlglot import exp
 
-from app.db.database import SQLiteDatabase
+from app.db.database import SQLiteDatabase, TABLE_DESCRIPTIONS
 from app.services.semantic import TRUSTED_ANSWERS, build_semantic_context
 from app.services.sql_validator import SQLSafetyError, validate_select_sql
 
@@ -76,44 +76,7 @@ def collect_knowledge_documents(db: SQLiteDatabase) -> list[KnowledgeDocument]:
 
     for source in db.list_data_sources():
         source_id = source["id"]
-        for table in db.list_catalog_tables(
-            source_id, include_non_queryable=True
-        ):
-            table_id = f"table:{table['name']}"
-            documents.append(
-                KnowledgeDocument(
-                    data_source_id=source_id,
-                    knowledge_type="schema",
-                    source_id=table_id,
-                    title=f"表 {table['name']}",
-                    content=(
-                        f"标识：{table_id}\n"
-                        "类型：表\n"
-                        f"描述：{table['description']}\n"
-                        f"可查询：{'是' if table['queryable'] else '否'}"
-                    ),
-                    queryable=table["queryable"],
-                )
-            )
-            for column in db.list_catalog_columns(
-                table["name"], source_id, include_non_queryable=True
-            ):
-                column_id = f"column:{table['name']}.{column['name']}"
-                documents.append(
-                    KnowledgeDocument(
-                        data_source_id=source_id,
-                        knowledge_type="schema",
-                        source_id=column_id,
-                        title=f"字段 {table['name']}.{column['name']}",
-                        content=(
-                            f"标识：{column_id}\n"
-                            f"类型：{column['type']}\n"
-                            f"描述：{column['description']}\n"
-                            f"可查询：{'是' if column['queryable'] else '否'}"
-                        ),
-                        queryable=column["queryable"],
-                    )
-                )
+        documents.extend(_schema_documents(db, source))
 
         for metric in metrics:
             context = build_semantic_context(
@@ -151,6 +114,91 @@ def collect_knowledge_documents(db: SQLiteDatabase) -> list[KnowledgeDocument]:
         documents.extend(_historical_qa_documents(db, source))
 
     return documents
+
+
+def _schema_documents(
+    db: SQLiteDatabase, source: dict[str, Any]
+) -> list[KnowledgeDocument]:
+    source_id = source["id"]
+    documents: list[KnowledgeDocument] = []
+    try:
+        tables = db.list_catalog_tables(source_id, include_non_queryable=True)
+    except Exception:
+        tables = _fallback_catalog_tables(source)
+
+    for table in tables:
+        table_name = table["name"]
+        table_id = f"table:{table_name}"
+        table_description = table["description"] or TABLE_DESCRIPTIONS.get(
+            table_name, ("", {})
+        )[0]
+        documents.append(
+            KnowledgeDocument(
+                data_source_id=source_id,
+                knowledge_type="schema",
+                source_id=table_id,
+                title=f"表 {table_name}",
+                content=(
+                    f"标识：{table_id}\n"
+                    "类型：表\n"
+                    f"描述：{table_description}\n"
+                    f"可查询：{'是' if table['queryable'] else '否'}"
+                ),
+                queryable=table["queryable"],
+            )
+        )
+        try:
+            columns = db.list_catalog_columns(
+                table_name, source_id, include_non_queryable=True
+            )
+        except Exception:
+            columns = _fallback_catalog_columns(source, table_name)
+        for column in columns:
+            column_id = f"column:{table_name}.{column['name']}"
+            documents.append(
+                KnowledgeDocument(
+                    data_source_id=source_id,
+                    knowledge_type="schema",
+                    source_id=column_id,
+                    title=f"字段 {table_name}.{column['name']}",
+                    content=(
+                        f"标识：{column_id}\n"
+                        f"类型：{column['type']}\n"
+                        f"描述：{column['description']}\n"
+                        f"可查询：{'是' if column['queryable'] else '否'}"
+                    ),
+                    queryable=column["queryable"],
+                )
+            )
+    return documents
+
+
+def _fallback_catalog_tables(source: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": table,
+            "description": TABLE_DESCRIPTIONS.get(table, ("", {}))[0],
+            "queryable": True,
+        }
+        for table in source["allowed_tables"]
+    ]
+
+
+def _fallback_catalog_columns(
+    source: dict[str, Any], table_name: str
+) -> list[dict[str, Any]]:
+    allowed = set(source["allowed_columns"].get(table_name, []))
+    field_descriptions = TABLE_DESCRIPTIONS.get(table_name, ("", {}))[1]
+    column_names = sorted(set(field_descriptions) | allowed)
+    return [
+        {
+            "name": column,
+            "type": "unknown",
+            "description": field_descriptions.get(column, ""),
+            "queryable": column in allowed,
+        }
+        for column in column_names
+    ]
 
 
 def _trusted_sql_documents(source: dict[str, Any]) -> list[KnowledgeDocument]:
