@@ -10,6 +10,124 @@ from app.services.llm import SQLGeneration
 from scripts import run_rag_ab_eval as rag_ab
 
 
+@pytest.mark.parametrize(
+    ("case_id", "sql"),
+    [
+        (
+            "paid_sales_30_day_ranking",
+            """
+            SELECT product_name, ROUND(SUM(amount), 2) AS total_amount
+            FROM orders
+            WHERE status = 'paid' AND created_at >= date('now', '-30 days')
+            GROUP BY product_name
+            ORDER BY total_amount DESC
+            LIMIT 5
+            """,
+        ),
+        (
+            "gross_profit_by_brand",
+            """
+            SELECT p.brand, ROUND(SUM(o.amount - p.cost_price), 2) AS gross_profit
+            FROM orders AS o
+            JOIN products AS p ON o.product_id = p.id
+            WHERE o.status = 'paid'
+            GROUP BY p.brand
+            ORDER BY gross_profit DESC
+            LIMIT 5
+            """,
+        ),
+        (
+            "category_refund_rate",
+            """
+            SELECT category,
+                   ROUND(SUM(CASE WHEN refund_amount > 0 OR status = 'refunded'
+                                  THEN 1 ELSE 0 END) * 1.0 / COUNT(*), 4) AS refund_rate
+            FROM orders
+            GROUP BY category
+            ORDER BY refund_rate DESC
+            LIMIT 5
+            """,
+        ),
+    ],
+)
+def test_case_failures_accepts_structurally_correct_sql(case_id, sql):
+    case = next(item for item in rag_ab.CASES if item["id"] == case_id)
+
+    assert rag_ab._case_failures(
+        case,
+        {"sql": sql, "data": [{"value": 1}], "error": None},
+        require_knowledge=False,
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("case_id", "sql", "expected_failures"),
+    [
+        (
+            "paid_sales_30_day_ranking",
+            """
+            SELECT product_name, amount, status, created_at
+            FROM orders
+            WHERE status = 'paid' AND created_at = '-30 days'
+            ORDER BY amount ASC
+            LIMIT 10
+            """,
+            {
+                "query is not grouped",
+                "query has no descending order",
+                "query has no aggregate expression",
+                "SUM(amount) is required",
+                "query must group by: product_name",
+                "LIMIT must be <= 5",
+            },
+        ),
+        (
+            "gross_profit_by_brand",
+            """
+            SELECT p.brand, SUM(p.cost_price - o.amount), o.product_id, p.id, o.status
+            FROM orders AS o
+            JOIN products AS p ON 1 = 1
+            WHERE o.status = 'paid'
+            GROUP BY p.brand
+            ORDER BY SUM(p.cost_price - o.amount) DESC
+            LIMIT 5
+            """,
+            {
+                "orders/products join relationship is required",
+                "aggregated amount - cost_price is required",
+            },
+        ),
+        (
+            "category_refund_rate",
+            """
+            SELECT category, SUM(refund_amount) AS refund_rate,
+                   status, 0 AS marker, 'refunded' AS state
+            FROM orders
+            GROUP BY category
+            ORDER BY refund_rate DESC
+            LIMIT 5
+            """,
+            {
+                "aggregate ratio expression is required",
+                "conditional refund logic inside an aggregate is required",
+            },
+        ),
+    ],
+)
+def test_case_failures_rejects_term_complete_but_wrong_structure(
+    case_id, sql, expected_failures
+):
+    case = next(item for item in rag_ab.CASES if item["id"] == case_id)
+
+    failures = rag_ab._case_failures(
+        case,
+        {"sql": sql, "data": [{"value": 1}], "error": None},
+        require_knowledge=False,
+    )
+
+    assert expected_failures <= set(failures)
+
+
 def test_case_failures_accepts_required_tables_columns_and_literals():
     case = {
         "required_tables": {"orders", "products"},
