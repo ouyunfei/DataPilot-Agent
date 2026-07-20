@@ -76,3 +76,5 @@ def test_eval_script_runs_successfully():
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Eval passed:" in result.stdout
     assert "Success rate:" in result.stdout
+    assert "RAG comparison: off 0/3, on 3/3" in result.stdout
+    assert "RAG improvement: +100.00pp" in result.stdout
