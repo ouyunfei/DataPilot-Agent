@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from app.db.database import DEFAULT_METRICS
+from app.db.database import SQLiteDatabase
 from app.db.meta_mysql import MySQLMetaDatabase
 
 
@@ -200,3 +201,64 @@ def test_mysql_meta_database_hides_password_in_errors(tmp_path):
 
     assert "secret" not in str(excinfo.value)
     assert "***" in str(excinfo.value)
+
+
+def test_migration_copies_sqlite_metadata_to_mysql_idempotently(tmp_path):
+    from scripts.migrate_sqlite_meta_to_mysql import migrate_metadata
+
+    sqlite_db = SQLiteDatabase(tmp_path / "source.db")
+    sqlite_db.initialize()
+    source = sqlite_db.get_default_data_source()
+    extra_source = sqlite_db.create_data_source(
+        name="orders_only",
+        db_type="sqlite",
+        database_url=str(tmp_path / "source.db"),
+        allowed_tables=["orders"],
+    )
+    metric = sqlite_db.create_metric(
+        metric_key="repeat_order_count",
+        name="复购订单数",
+        expression="COUNT(orders.id)",
+        description="重复购买订单数量。",
+    )
+    sqlite_db.log_query(
+        question="最近 30 天销售额是多少？",
+        sql="SELECT SUM(amount) FROM orders",
+        trusted_answer=False,
+        chart_type="bar",
+        row_count=1,
+        error=None,
+        duration_ms=10,
+        data_source_id=source["id"],
+        sql_explanation="汇总订单金额。",
+        answer="销售额 100 万。",
+    )
+    log_id = sqlite_db.list_query_logs()[0]["id"]
+    sqlite_db.update_query_feedback(log_id, "like", "准确")
+    sqlite_db.create_session("s1")
+    sqlite_db.save_chat_message("s1", "问题", "SELECT 1", "答案")
+
+    target, fake = _db(tmp_path)
+
+    first = migrate_metadata(sqlite_db.path, target)
+    second = migrate_metadata(sqlite_db.path, target)
+
+    assert first == second
+    assert first["data_sources"] == len(sqlite_db.list_data_sources())
+    assert first["metrics"] == len(sqlite_db.list_metrics())
+    assert target.get_data_source(extra_source["id"])["name"] == "orders_only"
+    assert target.get_metric(metric["id"])["name"] == "复购订单数"
+    assert target.list_high_quality_historical_qa(source["id"])[0]["id"] == log_id
+    assert "问题" in target.get_recent_session_context("s1")
+    assert fake.sqlite.execute("SELECT COUNT(*) FROM data_sources").fetchone()[0] == first["data_sources"]
+
+    with sqlite_db._connect() as conn:
+        source_created_at = conn.execute(
+            "SELECT created_at FROM query_logs WHERE id = ?",
+            (log_id,),
+        ).fetchone()["created_at"]
+    target_created_at = fake.sqlite.execute(
+        "SELECT created_at FROM query_logs WHERE id = ?",
+        (log_id,),
+    ).fetchone()[0]
+    assert target_created_at == source_created_at
