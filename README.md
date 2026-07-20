@@ -248,7 +248,7 @@ python scripts/run_rag_ab_eval.py
 
 该脚本复制默认 SQLite 数据库到临时目录，用真实 DeepSeek 分别运行两个完整 Agent：`off` 不启用知识检索，`on` 使用真实 BGE/Qdrant 检索；两组均执行生成 SQL，并按参考结果评分。它依赖本地配置和模型输出，不进入 CI。结果应如实报告为正向、持平或负向，单次结果不能外推为长期保证。
 
-最近一次真实运行结果持平，尚未证明 RAG 带来质量提升。完整的带日期运行记录见 [实施计划最终验证记录](docs/superpowers/plans/2026-07-13-qdrant-local-rag.md#final-verification-record-2026-07-20)。
+最近一次真实运行（2026-07-20）结果为 `off 3/3`、`on 3/3`、`Delta: tie`，尚未证明 RAG 带来质量提升。
 
 ## Docker 启动
 
@@ -567,12 +567,6 @@ SQL 执行前必须通过 `validate_sql`：
 - 使用 SQLGlot 做 AST 级别校验
 
 ## 语义层、可信答案、查询日志、图表推荐和洞察
-
-新增能力沉淀在：
-
-```text
-docs/semantic-trusted-logging-chart-design.md
-```
 
 后端会从 `metrics` 表读取启用指标并注入给 DeepSeek；常见问题命中可信 SQL；每次查询写入 `query_logs`；接口返回 `chart` 字段给未来前端使用。数据源白名单会同时作用于 schema 注入和 SQL 安全校验。
 
