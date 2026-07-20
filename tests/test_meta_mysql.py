@@ -1,11 +1,18 @@
+import os
 import re
 import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from app.db.database import DEFAULT_METRICS
 from app.db.database import SQLiteDatabase
 from app.db.meta_mysql import MySQLMetaDatabase
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeMySQLCursor:
@@ -262,3 +269,20 @@ def test_migration_copies_sqlite_metadata_to_mysql_idempotently(tmp_path):
         (log_id,),
     ).fetchone()[0]
     assert target_created_at == source_created_at
+
+
+def test_migration_script_runs_from_file_path_without_pythonpath():
+    env = {**os.environ, "META_DATABASE_URL": ""}
+
+    result = subprocess.run(
+        [sys.executable, "scripts/migrate_sqlite_meta_to_mysql.py"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "请先配置 META_DATABASE_URL" in result.stderr
+    assert "ModuleNotFoundError" not in result.stderr

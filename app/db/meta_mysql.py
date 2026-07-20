@@ -66,7 +66,7 @@ class MySQLMetaDatabase(SQLiteDatabase):
             CREATE TABLE IF NOT EXISTS query_logs (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
                 question TEXT NOT NULL,
-                sql TEXT NOT NULL,
+                `sql` TEXT NOT NULL,
                 trusted_answer TINYINT(1) NOT NULL,
                 chart_type VARCHAR(32) NOT NULL,
                 row_count INT NOT NULL,
@@ -93,7 +93,7 @@ class MySQLMetaDatabase(SQLiteDatabase):
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
                 session_id VARCHAR(64) NOT NULL,
                 question TEXT NOT NULL,
-                sql TEXT NOT NULL,
+                `sql` TEXT NOT NULL,
                 answer TEXT NOT NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -410,7 +410,7 @@ class MySQLMetaDatabase(SQLiteDatabase):
         self._execute(
             """
             INSERT INTO query_logs (
-                question, sql, trusted_answer, chart_type, row_count,
+                question, `sql`, trusted_answer, chart_type, row_count,
                 error, error_code, duration_ms, data_source_id,
                 sql_explanation, answer
             )
@@ -435,7 +435,7 @@ class MySQLMetaDatabase(SQLiteDatabase):
         return self._fetchall(
             """
             SELECT
-                id, question, sql, trusted_answer, chart_type, row_count,
+                id, question, `sql`, trusted_answer, chart_type, row_count,
                 error, error_code, feedback, feedback_note, duration_ms, created_at
             FROM query_logs
             ORDER BY id DESC
@@ -462,13 +462,13 @@ class MySQLMetaDatabase(SQLiteDatabase):
     ) -> list[dict[str, Any]]:
         return self._fetchall(
             """
-            SELECT id, question, sql, sql_explanation, answer, data_source_id
+            SELECT id, question, `sql`, sql_explanation, answer, data_source_id
             FROM query_logs
             WHERE data_source_id = %s
               AND error IS NULL
               AND feedback = 'like'
               AND TRIM(question) != ''
-              AND TRIM(sql) != ''
+              AND TRIM(`sql`) != ''
               AND TRIM(answer) != ''
             ORDER BY id ASC
             """,
@@ -487,7 +487,7 @@ class MySQLMetaDatabase(SQLiteDatabase):
     def save_chat_message(self, session_id: str, question: str, sql: str, answer: str) -> None:
         self._execute(
             """
-            INSERT INTO chat_messages (session_id, question, sql, answer)
+            INSERT INTO chat_messages (session_id, question, `sql`, answer)
             VALUES (%s, %s, %s, %s)
             """,
             (session_id, question, sql, answer),
@@ -500,7 +500,7 @@ class MySQLMetaDatabase(SQLiteDatabase):
     def get_recent_session_context(self, session_id: str, limit: int = 3) -> str:
         rows = self._fetchall(
             """
-            SELECT question, sql, answer
+            SELECT question, `sql`, answer
             FROM chat_messages
             WHERE session_id = %s
             ORDER BY id DESC

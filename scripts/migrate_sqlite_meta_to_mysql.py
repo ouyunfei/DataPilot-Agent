@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 from app.core.config import DEFAULT_DATABASE_PATH, META_DATABASE_URL
 from app.db.meta_mysql import MySQLMetaDatabase
 
@@ -78,8 +81,9 @@ def _replace_row(
     row: sqlite3.Row,
 ) -> None:
     placeholders = ", ".join(["%s"] * len(columns))
+    target_columns = ", ".join(f"`{column}`" for column in columns)
     target._execute(
-        f"REPLACE INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
+        f"REPLACE INTO `{table}` ({target_columns}) VALUES ({placeholders})",
         tuple(row[column] for column in columns),
     )
 

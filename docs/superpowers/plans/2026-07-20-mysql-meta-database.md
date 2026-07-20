@@ -193,6 +193,7 @@ git commit -m "docs: document mysql meta database switch"
 
 ## Final Verification Record (2026-07-20)
 
-- `python -m pytest -q`: 171 passed.
+- `python -m pytest -q`: 172 passed.
 - `python scripts/run_evals.py`: Eval passed 7/7; synthetic RAG wiring smoke off 0/3, on 3/3.
 - `git diff --check`: clean.
+- A real local migration to MySQL `127.0.0.1:3306/datapilot` succeeded: `data_sources=7`, `metrics=6`, `query_logs=27`, `chat_sessions=22`, `chat_messages=20`.
