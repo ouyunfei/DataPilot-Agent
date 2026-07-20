@@ -330,6 +330,30 @@ def _copy_eval_database(destination: Path) -> SQLiteDatabase:
     return db
 
 
+def _seed_benchmark_counterexamples(db: SQLiteDatabase) -> None:
+    with sqlite3.connect(db.path) as conn:
+        max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM orders").fetchone()[0]
+        user = conn.execute("SELECT id, city FROM users ORDER BY id LIMIT 1").fetchone()
+        product = conn.execute(
+            "SELECT id, product_name FROM products ORDER BY id LIMIT 1"
+        ).fetchone()
+        if user is None or product is None:
+            raise RuntimeError("Benchmark counterexample references are unavailable")
+        conn.executemany(
+            """
+            INSERT INTO orders (
+                id, user_id, product_id, product_name, category, city, amount,
+                status, created_at, refund_amount
+            )
+            VALUES (?, ?, ?, ?, 'RAG退款反例品类', ?, 0, ?, '2000-01-01', ?)
+            """,
+            [
+                (max_id + 1, user[0], product[0], product[1], user[1], "cancelled", 10),
+                (max_id + 2, user[0], product[0], product[1], user[1], "refunded", 0),
+            ],
+        )
+
+
 def _reference_rows(db: SQLiteDatabase) -> dict[str, list[dict[str, Any]]]:
     return {case["id"]: db.execute_select(case["reference_sql"]) for case in CASES}
 
@@ -357,6 +381,7 @@ def main() -> int:
         )
         with tempfile.TemporaryDirectory() as tmp_dir:
             db = _copy_eval_database(Path(tmp_dir) / "rag-ab.db")
+            _seed_benchmark_counterexamples(db)
             expected_rows = _reference_rows(db)
             agents = {
                 "off": DataAnalysisAgent(db=db, llm=llm),

@@ -418,6 +418,69 @@ def test_copy_eval_database_includes_committed_uncheckpointed_wal_rows(
         writer.close()
 
 
+def test_seeded_refund_counterexamples_make_or_and_results_differ(
+    monkeypatch, tmp_path
+):
+    source_path = tmp_path / "source-counterexamples.db"
+    source = SQLiteDatabase(source_path)
+    source.initialize()
+    original_max_id = source.execute_select("SELECT MAX(id) AS id FROM orders")[0]["id"]
+    monkeypatch.setattr(rag_ab, "DEFAULT_DATABASE_PATH", source_path)
+    copied = rag_ab._copy_eval_database(tmp_path / "copied-counterexamples.db")
+    before_rows = rag_ab._reference_rows(copied)
+
+    rag_ab._seed_benchmark_counterexamples(copied)
+
+    case = next(item for item in rag_ab.CASES if item["id"] == "category_refund_rate")
+    after_rows = rag_ab._reference_rows(copied)
+    expected_rows = after_rows[case["id"]]
+    and_sql = """
+        SELECT category,
+               COUNT(*) AS order_count,
+               SUM(CASE WHEN refund_amount > 0 AND status = 'refunded'
+                        THEN 1 ELSE 0 END) AS refund_count,
+               ROUND(SUM(CASE WHEN refund_amount > 0 AND status = 'refunded'
+                              THEN 1 ELSE 0 END) * 1.0 / COUNT(*), 4) AS refund_rate
+        FROM orders
+        GROUP BY category
+        ORDER BY refund_rate DESC, refund_count DESC, category ASC
+        LIMIT 5
+    """
+    and_rows = copied.execute_select(and_sql)
+    seeded = copied.execute_select(
+        """
+        SELECT o.id, o.status, o.refund_amount, u.id AS user_id, p.id AS product_id
+        FROM orders AS o
+        JOIN users AS u ON o.user_id = u.id
+        JOIN products AS p ON o.product_id = p.id
+        WHERE o.category = 'RAG退款反例品类'
+        ORDER BY o.id
+        """
+    )
+
+    assert [row["id"] for row in seeded] == [original_max_id + 1, original_max_id + 2]
+    assert [(row["status"], row["refund_amount"]) for row in seeded] == [
+        ("cancelled", 10.0),
+        ("refunded", 0.0),
+    ]
+    assert expected_rows != and_rows
+    assert expected_rows[0]["category"] == "RAG退款反例品类"
+    assert after_rows["paid_sales_30_day_ranking"] == before_rows[
+        "paid_sales_30_day_ranking"
+    ]
+    assert after_rows["gross_profit_by_brand"] == before_rows["gross_profit_by_brand"]
+    assert source.execute_select(
+        "SELECT COUNT(*) AS count FROM orders WHERE category = 'RAG退款反例品类'"
+    ) == [{"count": 0}]
+    failures = rag_ab._case_failures(
+        case,
+        {"sql": and_sql, "data": and_rows, "error": None},
+        require_knowledge=False,
+        expected_rows=expected_rows,
+    )
+    assert "ordered labels differ from reference" in failures
+
+
 def test_sql_only_client_delegates_generation_and_skips_analysis_api():
     calls = []
 
