@@ -45,7 +45,7 @@ FastAPI + LangGraph
 
 MySQL 是唯一需要保证持久性和事务一致性的存储。
 
-- `datapilot_meta` 保存数据源配置、指标、日志、会话和反馈。
+- `datapilot` 元数据库保存数据源配置、指标、日志、会话和反馈。
 - 企业业务数据库由 Agent 通过独立只读账号访问。
 - 元数据库账号与业务数据库账号必须分离：前者可读写平台数据，后者只能 `SELECT` 业务表。
 - 数据库连接密码不得写入日志或 API 响应，后续应迁移到环境变量或 Secret Manager。
@@ -119,11 +119,11 @@ PostgreSQL 不再作为默认运行依赖。可以先保留适配器和测试，
 
 ### 阶段二：MySQL 元数据库
 
-- 在 MySQL 创建 `datapilot_meta`。
-- 迁移 SQLite 中的平台表和数据。
-- 为元数据库建立独立读写账号。
-- 把配置、日志、会话和指标访问切换到 MySQL。
-- 保留一次可验证的迁移或回滚路径。
+- 已实现兼容切换：默认仍用 SQLite；配置 `META_DB_TYPE=mysql` 和 `META_DATABASE_URL` 后，平台元数据读写进入 MySQL。
+- MySQL 库需先手动创建；当前目标库名为 `datapilot`。
+- 已提供 `scripts/migrate_sqlite_meta_to_mysql.py`，只迁移 `data_sources`、`metrics`、`query_logs`、`chat_sessions`、`chat_messages`。
+- 本阶段不迁移 `orders/users/products` 业务表，不删除 SQLite 代码，保留回滚路径。
+- 元数据库账号应为读写账号；业务数据源账号仍建议只给 `SELECT`。
 
 ### 阶段三：收敛关系型数据库
 

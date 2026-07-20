@@ -19,12 +19,13 @@
 - 字段级权限白名单：每个数据源独立配置允许查询的字段
 - 数据目录接口：查看可查询表、字段、字段类型和字段说明
 - 查询保护增强：SQL 执行超时、错误分类和日志记录
-- 指标管理：用 SQLite 配置销售额、退款率、客单价、毛利、订单数等业务口径
+- MySQL 元数据库兼容切换：默认 SQLite；配置后平台元数据写入 MySQL
+- 指标管理：配置销售额、退款率、客单价、毛利、订单数等业务口径
 - 语义层把启用指标动态注入给 Agent
 - 高频问题优先命中可信 SQL
 - Qdrant Local 本地 RAG：按 `data_source_id` 隔离 Schema、指标、可信 SQL 和高质量历史问答四类知识
 - 本地 `BAAI/bge-small-zh-v1.5` Embedding；知识库不可用或无召回时 fail-open 回退原查询流程
-- SQLite 记录查询日志，便于后续运营和优化
+- 查询日志、反馈、会话和统计沉淀到平台元数据库
 - 查询日志列表和用户反馈接口
 - 多轮追问：返回并复用 `session_id`，把最近会话上下文注入 SQL 生成
 - 查询统计接口：统计成功率、失败数、图表类型分布和高频问题
@@ -52,6 +53,7 @@ DataPilot-Agent/
 │   ├── db/
 │   │   ├── database.py          # SQLite 初始化、数据源、日志、schema 获取、查询执行
 │   │   ├── mysql.py             # MySQL 连接、目录读取、查询执行
+│   │   ├── meta_mysql.py        # MySQL 平台元数据库
 │   │   └── postgres.py          # PostgreSQL 连接、目录读取、查询执行
 │   ├── schemas/
 │   │   └── chat.py              # Pydantic 请求/响应模型
@@ -71,6 +73,7 @@ DataPilot-Agent/
 │   └── questions.json          # Text-to-SQL 评测问题集
 ├── scripts/
 │   ├── rebuild_knowledge_index.py # 重建本地知识索引
+│   ├── migrate_sqlite_meta_to_mysql.py # SQLite 平台元数据迁移到 MySQL
 │   ├── run_evals.py              # 离线确定性 eval 与合成 RAG wiring smoke
 │   └── run_rag_ab_eval.py        # 可选的真实 DeepSeek RAG off/on A/B
 ├── tests/
@@ -179,6 +182,8 @@ QDRANT_PATH=data/qdrant
 QDRANT_COLLECTION=datapilot_knowledge_bge_small_zh_v15
 EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 KNOWLEDGE_TOP_K=5
+META_DB_TYPE=sqlite
+META_DATABASE_URL=
 ```
 
 启动服务：
@@ -191,6 +196,31 @@ uvicorn app.main:app --reload
 
 - 健康检查：http://127.0.0.1:8000/health
 - Swagger 文档：http://127.0.0.1:8000/docs
+
+## MySQL 元数据库
+
+默认 `META_DB_TYPE=sqlite`，平台配置、指标、日志、反馈和会话继续写入 `data/datapilot.db`。
+
+切到 MySQL 前先创建库；脚本不会自动建库：
+
+```sql
+CREATE DATABASE datapilot DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
+配置：
+
+```env
+META_DB_TYPE=mysql
+META_DATABASE_URL=mysql://user:password@localhost:3306/datapilot
+```
+
+启动后 5 张平台表会在 MySQL 中初始化：`data_sources`、`metrics`、`query_logs`、`chat_sessions`、`chat_messages`。本阶段只迁移平台元数据，不迁移 `orders/users/products` 业务表，也不删除 SQLite 回滚路径。
+
+一次性迁移：
+
+```bash
+python scripts/migrate_sqlite_meta_to_mysql.py
+```
 
 ## Local RAG
 
