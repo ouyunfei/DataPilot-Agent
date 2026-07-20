@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 import shutil
 import sys
 import tempfile
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -41,27 +43,38 @@ CASES = [
     {
         "id": "paid_sales_30_day_ranking",
         "question": "请列出过去30天实际成交销售额最高的5个商品。",
+        "reference_sql": """
+            SELECT product_name, ROUND(SUM(amount), 2) AS sales_amount
+            FROM orders
+            WHERE status = 'paid' AND created_at >= date('now', '-30 days')
+            GROUP BY product_name
+            ORDER BY sales_amount DESC
+            LIMIT 5
+        """,
+        "label_field": "product_name",
+        "metric_field": "sales_amount",
+        "metric_aliases": {"sales_amount", "total_amount", "total_sales", "sales"},
+        "metric_tolerance": 0.01,
         "required_tables": {"orders"},
         "required_columns": {"product_name", "amount", "status", "created_at"},
         "required_literals": {"paid", "-30 days"},
-        "require_select": True,
-        "require_group_by": True,
-        "require_desc_order": True,
-        "require_aggregate": True,
-        "require_where": True,
-        "require_paid_where": True,
-        "require_date_where": True,
-        "require_orders_products_join": False,
-        "require_sum_amount": True,
-        "require_aggregate_subtraction": False,
-        "require_ratio": False,
-        "require_refund_condition": False,
-        "required_group_columns": {"product_name"},
-        "max_limit": 5,
     },
     {
         "id": "gross_profit_by_brand",
         "question": "按品牌比较已成交订单的毛利，列出最高的5个品牌。",
+        "reference_sql": """
+            SELECT p.brand, ROUND(SUM(o.amount - p.cost_price), 2) AS gross_profit
+            FROM orders AS o
+            JOIN products AS p ON o.product_id = p.id
+            WHERE o.status = 'paid'
+            GROUP BY p.brand
+            ORDER BY gross_profit DESC
+            LIMIT 5
+        """,
+        "label_field": "brand",
+        "metric_field": "gross_profit",
+        "metric_aliases": {"gross_profit", "total_gross_profit", "profit"},
+        "metric_tolerance": 0.01,
         "required_tables": {"orders", "products"},
         "required_columns": {
             "brand",
@@ -72,41 +85,29 @@ CASES = [
             "status",
         },
         "required_literals": {"paid"},
-        "require_select": True,
-        "require_group_by": True,
-        "require_desc_order": True,
-        "require_aggregate": True,
-        "require_where": True,
-        "require_paid_where": True,
-        "require_date_where": False,
-        "require_orders_products_join": True,
-        "require_sum_amount": False,
-        "require_aggregate_subtraction": True,
-        "require_ratio": False,
-        "require_refund_condition": False,
-        "required_group_columns": {"brand"},
-        "max_limit": 5,
     },
     {
         "id": "category_refund_rate",
         "question": "想看各商品品类的退款占比排行，退款应按发生退款的订单来认定。",
+        "reference_sql": """
+            SELECT category,
+                   COUNT(*) AS order_count,
+                   SUM(CASE WHEN refund_amount > 0 OR status = 'refunded'
+                            THEN 1 ELSE 0 END) AS refund_count,
+                   ROUND(SUM(CASE WHEN refund_amount > 0 OR status = 'refunded'
+                                  THEN 1 ELSE 0 END) * 1.0 / COUNT(*), 4) AS refund_rate
+            FROM orders
+            GROUP BY category
+            ORDER BY refund_rate DESC, refund_count DESC
+            LIMIT 5
+        """,
+        "label_field": "category",
+        "metric_field": "refund_rate",
+        "metric_aliases": {"refund_rate", "rate"},
+        "metric_tolerance": 0.000001,
         "required_tables": {"orders"},
         "required_columns": {"category", "refund_amount", "status"},
         "required_literals": {"refunded", "0"},
-        "require_select": True,
-        "require_group_by": True,
-        "require_desc_order": True,
-        "require_aggregate": True,
-        "require_where": False,
-        "require_paid_where": False,
-        "require_date_where": False,
-        "require_orders_products_join": False,
-        "require_sum_amount": False,
-        "require_aggregate_subtraction": False,
-        "require_ratio": True,
-        "require_refund_condition": True,
-        "required_group_columns": {"category"},
-        "max_limit": 5,
     },
 ]
 
@@ -129,7 +130,10 @@ class SQLOnlyLLMClient:
 
 
 def _case_failures(
-    case: dict[str, Any], result: dict[str, Any], require_knowledge: bool
+    case: dict[str, Any],
+    result: dict[str, Any],
+    require_knowledge: bool,
+    expected_rows: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     failures = []
     if result.get("error"):
@@ -148,7 +152,8 @@ def _case_failures(
         if missing:
             failures.append(f"missing {label}: {', '.join(missing)}")
 
-    failures.extend(_structural_failures(case, expression))
+    if expected_rows is not None:
+        failures.extend(_result_failures(case, result.get("data", []), expected_rows))
 
     if require_knowledge and not result.get("knowledge_sources"):
         failures.append("knowledge was not retrieved")
@@ -174,154 +179,69 @@ def _sql_terms(
     )
 
 
-def _structural_failures(
-    case: dict[str, Any], expression: exp.Expression | None
+def _result_failures(
+    case: dict[str, Any],
+    actual_rows: list[dict[str, Any]],
+    expected_rows: list[dict[str, Any]],
 ) -> list[str]:
-    if expression is None:
-        return ["SQL could not be parsed"] if case.get("require_select") else []
-
     failures = []
-    if case.get("require_select") and not isinstance(expression, exp.Select):
-        failures.append("query is not a SELECT")
-        return failures
+    if len(actual_rows) != len(expected_rows):
+        failures.append("result row count differs from reference")
 
-    group = expression.args.get("group")
-    order = expression.args.get("order")
-    aggregates = list(expression.find_all(exp.AggFunc))
-    if case.get("require_group_by") and not (group and group.expressions):
-        failures.append("query is not grouped")
-    if case.get("require_desc_order") and not (
-        order and any(item.args.get("desc") is True for item in order.expressions)
-    ):
-        failures.append("query has no descending order")
-    if case.get("require_aggregate") and not aggregates:
-        failures.append("query has no aggregate expression")
-    if case.get("require_where") and not expression.args.get("where"):
-        failures.append("query has no WHERE clause")
+    label_field = case["label_field"]
+    if [row.get(label_field) for row in actual_rows] != [
+        row.get(label_field) for row in expected_rows
+    ]:
+        failures.append("ordered labels differ from reference")
 
-    where = expression.args.get("where")
-    if case.get("require_paid_where") and not _contains_terms(
-        where, columns={"status"}, literals={"paid"}
+    metric_field = _actual_metric_field(case, actual_rows)
+    if metric_field is None:
+        failures.append("primary metric is missing or ambiguous")
+    elif len(actual_rows) == len(expected_rows) and any(
+        not _numbers_close(
+            actual.get(metric_field),
+            expected.get(case["metric_field"]),
+            case["metric_tolerance"],
+        )
+        for actual, expected in zip(actual_rows, expected_rows)
     ):
-        failures.append("WHERE status = paid is required")
-    if case.get("require_date_where") and not _contains_terms(
-        where, columns={"created_at"}, literals={"-30 days"}
-    ):
-        failures.append("30-day date filter is required")
-
-    required_group_columns = case.get("required_group_columns", set())
-    group_columns = _column_names(group)
-    missing_group_columns = sorted(required_group_columns - group_columns)
-    if missing_group_columns:
-        failures.append(f"query must group by: {', '.join(missing_group_columns)}")
-
-    max_limit = case.get("max_limit")
-    if max_limit is not None and _literal_limit(expression) not in range(1, max_limit + 1):
-        failures.append(f"LIMIT must be <= {max_limit}")
-
-    if case.get("require_sum_amount") and not any(
-        isinstance(aggregate, exp.Sum) and "amount" in _column_names(aggregate)
-        for aggregate in aggregates
-    ):
-        failures.append("SUM(amount) is required")
-    if case.get("require_orders_products_join") and not _has_orders_products_join(
-        expression
-    ):
-        failures.append("orders/products join relationship is required")
-    if case.get("require_aggregate_subtraction") and not any(
-        "amount" in _column_names(subtraction.left)
-        and "cost_price" in _column_names(subtraction.right)
-        for aggregate in aggregates
-        for subtraction in aggregate.find_all(exp.Sub)
-    ):
-        failures.append("aggregated amount - cost_price is required")
-    if case.get("require_ratio") and not any(
-        _has_aggregate(division.left) and _has_aggregate(division.right)
-        for division in expression.find_all(exp.Div)
-    ):
-        failures.append("aggregate ratio expression is required")
-    if case.get("require_refund_condition") and not _has_refund_condition(
-        expression, aggregates
-    ):
-        failures.append("conditional refund logic inside an aggregate is required")
+        failures.append("primary metric differs from reference")
     return failures
 
 
-def _column_names(expression: exp.Expression | None) -> set[str]:
-    if expression is None:
-        return set()
-    return {column.name.lower() for column in expression.find_all(exp.Column)}
-
-
-def _literal_values(expression: exp.Expression | None) -> set[str]:
-    if expression is None:
-        return set()
-    return {
-        str(literal.this).lower() for literal in expression.find_all(exp.Literal)
-    }
-
-
-def _contains_terms(
-    expression: exp.Expression | None, columns: set[str], literals: set[str]
-) -> bool:
-    return columns <= _column_names(expression) and literals <= _literal_values(expression)
-
-
-def _literal_limit(expression: exp.Expression) -> int | None:
-    limit = expression.args.get("limit")
-    literal = limit.expression if limit else None
-    if not isinstance(literal, exp.Literal) or literal.is_string:
+def _actual_metric_field(
+    case: dict[str, Any], rows: list[dict[str, Any]]
+) -> str | None:
+    if not rows:
         return None
-    try:
-        return int(literal.this)
-    except (TypeError, ValueError):
-        return None
-
-
-def _has_aggregate(expression: exp.Expression) -> bool:
-    return isinstance(expression, exp.AggFunc) or any(
-        expression.find_all(exp.AggFunc)
-    )
-
-
-def _has_orders_products_join(expression: exp.Expression) -> bool:
+    keys = set.intersection(*(set(row) for row in rows))
     aliases = {
-        table.alias_or_name.lower(): table.name.lower()
-        for table in expression.find_all(exp.Table)
+        key
+        for key in keys
+        if key.lower() in case["metric_aliases"]
+        and all(_is_number(row[key]) for row in rows)
     }
-    required = {("orders", "product_id"), ("products", "id")}
-    for join in expression.args.get("joins", []):
-        on = join.args.get("on")
-        for equality in on.find_all(exp.EQ) if on else []:
-            left = _column_references(equality.left, aliases)
-            right = _column_references(equality.right, aliases)
-            if any({left_ref, right_ref} == required for left_ref in left for right_ref in right):
-                return True
-    return False
-
-
-def _column_references(
-    expression: exp.Expression, aliases: dict[str, str]
-) -> set[tuple[str, str]]:
-    return {
-        (aliases.get(column.table.lower(), column.table.lower()), column.name.lower())
-        for column in expression.find_all(exp.Column)
-        if column.table
+    if len(aliases) == 1:
+        return aliases.pop()
+    if aliases:
+        return None
+    numeric = {
+        key
+        for key in keys
+        if key != case["label_field"]
+        and "count" not in key.lower()
+        and all(_is_number(row[key]) for row in rows)
     }
+    return numeric.pop() if len(numeric) == 1 else None
 
 
-def _has_refund_condition(
-    expression: exp.Expression, aggregates: list[exp.AggFunc]
-) -> bool:
-    required_columns = {"refund_amount", "status"}
-    for aggregate in aggregates:
-        for condition in aggregate.find_all(exp.Case, exp.If, exp.Or):
-            if required_columns <= _column_names(condition):
-                return True
-    return any(
-        required_columns <= _column_names(filter_expression)
-        and _has_aggregate(filter_expression)
-        for filter_expression in expression.find_all(exp.Filter)
+def _is_number(value: Any) -> bool:
+    return isinstance(value, Real) and not isinstance(value, bool)
+
+
+def _numbers_close(actual: Any, expected: Any, tolerance: float) -> bool:
+    return _is_number(actual) and _is_number(expected) and math.isclose(
+        float(actual), float(expected), rel_tol=1e-9, abs_tol=tolerance
     )
 
 
@@ -378,6 +298,10 @@ def _copy_eval_database(destination: Path) -> SQLiteDatabase:
     return db
 
 
+def _reference_rows(db: SQLiteDatabase) -> dict[str, list[dict[str, Any]]]:
+    return {case["id"]: db.execute_select(case["reference_sql"]) for case in CASES}
+
+
 def main() -> int:
     error = _precondition_error()
     if error:
@@ -401,6 +325,7 @@ def main() -> int:
         )
         with tempfile.TemporaryDirectory() as tmp_dir:
             db = _copy_eval_database(Path(tmp_dir) / "rag-ab.db")
+            expected_rows = _reference_rows(db)
             agents = {
                 "off": DataAnalysisAgent(db=db, llm=llm),
                 "on": DataAnalysisAgent(db=db, llm=llm, knowledge=knowledge),
@@ -412,7 +337,10 @@ def main() -> int:
                 for arm, agent in agents.items():
                     result = agent.run(case["question"], data_source_id=1)
                     failures = _case_failures(
-                        case, result, require_knowledge=arm == "on"
+                        case,
+                        result,
+                        require_knowledge=arm == "on",
+                        expected_rows=expected_rows[case["id"]],
                     )
                     scores[arm] += not failures
                     detail = f" - {'; '.join(failures)}" if failures else ""

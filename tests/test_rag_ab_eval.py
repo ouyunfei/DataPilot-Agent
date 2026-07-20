@@ -11,121 +11,151 @@ from scripts import run_rag_ab_eval as rag_ab
 
 
 @pytest.mark.parametrize(
-    ("case_id", "sql"),
+    ("case_id", "actual_metric"),
+    [
+        ("paid_sales_30_day_ranking", "total_sales"),
+        ("gross_profit_by_brand", "profit"),
+        ("category_refund_rate", "rate"),
+    ],
+)
+def test_case_failures_accepts_equivalent_results_with_metric_alias(
+    case_id, actual_metric
+):
+    case = next(item for item in rag_ab.CASES if item["id"] == case_id)
+    label = case["label_field"]
+    metric = case["metric_field"]
+    expected_rows = [
+        {label: "A", metric: 10.0},
+        {label: "B", metric: 8.0},
+    ]
+    actual_rows = [
+        {
+            label: "A",
+            actual_metric: 10.0 + case["metric_tolerance"] / 2,
+            "order_count": 3,
+        },
+        {label: "B", actual_metric: 8.0, "order_count": 2},
+    ]
+
+    assert rag_ab._case_failures(
+        case,
+        {"sql": case["reference_sql"], "data": actual_rows, "error": None},
+        require_knowledge=False,
+        expected_rows=expected_rows,
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("case_id", "wrong_sql", "actual_rows", "expected_failure"),
     [
         (
             "paid_sales_30_day_ranking",
             """
-            SELECT product_name, ROUND(SUM(amount), 2) AS total_amount
+            SELECT product_name, SUM(amount) AS total_amount, status, created_at
             FROM orders
-            WHERE status = 'paid' AND created_at >= date('now', '-30 days')
+            WHERE status != 'paid' OR created_at < date('now', '-30 days')
             GROUP BY product_name
-            ORDER BY total_amount DESC
-            LIMIT 5
+            ORDER BY total_amount ASC
+            LIMIT 3
             """,
+            [
+                {"product_name": "B", "total_amount": 8.0},
+                {"product_name": "A", "total_amount": 10.0},
+            ],
+            "ordered labels differ from reference",
         ),
         (
             "gross_profit_by_brand",
             """
-            SELECT p.brand, ROUND(SUM(o.amount - p.cost_price), 2) AS gross_profit
+            SELECT p.brand, SUM(p.cost_price - o.amount) AS gross_profit,
+                   o.product_id, p.id, o.status
             FROM orders AS o
-            JOIN products AS p ON o.product_id = p.id
+            JOIN products AS p ON o.product_id = p.id OR 1 = 1
             WHERE o.status = 'paid'
             GROUP BY p.brand
             ORDER BY gross_profit DESC
             LIMIT 5
             """,
+            [
+                {"brand": "A", "gross_profit": -10.0},
+                {"brand": "B", "gross_profit": -8.0},
+            ],
+            "primary metric differs from reference",
         ),
         (
             "category_refund_rate",
             """
             SELECT category,
-                   ROUND(SUM(CASE WHEN refund_amount > 0 OR status = 'refunded'
-                                  THEN 1 ELSE 0 END) * 1.0 / COUNT(*), 4) AS refund_rate
+                   COUNT(*) * 1.0 / SUM(CASE WHEN refund_amount > 0
+                                             OR status = 'refunded' THEN 1 ELSE 0 END)
+                       AS refund_rate
             FROM orders
             GROUP BY category
             ORDER BY refund_rate DESC
             LIMIT 5
             """,
+            [
+                {"category": "A", "refund_rate": 0.9},
+                {"category": "B", "refund_rate": 0.8},
+            ],
+            "primary metric differs from reference",
         ),
     ],
 )
-def test_case_failures_accepts_structurally_correct_sql(case_id, sql):
-    case = next(item for item in rag_ab.CASES if item["id"] == case_id)
-
-    assert rag_ab._case_failures(
-        case,
-        {"sql": sql, "data": [{"value": 1}], "error": None},
-        require_knowledge=False,
-    ) == []
-
-
-@pytest.mark.parametrize(
-    ("case_id", "sql", "expected_failures"),
-    [
-        (
-            "paid_sales_30_day_ranking",
-            """
-            SELECT product_name, amount, status, created_at
-            FROM orders
-            WHERE status = 'paid' AND created_at = '-30 days'
-            ORDER BY amount ASC
-            LIMIT 10
-            """,
-            {
-                "query is not grouped",
-                "query has no descending order",
-                "query has no aggregate expression",
-                "SUM(amount) is required",
-                "query must group by: product_name",
-                "LIMIT must be <= 5",
-            },
-        ),
-        (
-            "gross_profit_by_brand",
-            """
-            SELECT p.brand, SUM(p.cost_price - o.amount), o.product_id, p.id, o.status
-            FROM orders AS o
-            JOIN products AS p ON 1 = 1
-            WHERE o.status = 'paid'
-            GROUP BY p.brand
-            ORDER BY SUM(p.cost_price - o.amount) DESC
-            LIMIT 5
-            """,
-            {
-                "orders/products join relationship is required",
-                "aggregated amount - cost_price is required",
-            },
-        ),
-        (
-            "category_refund_rate",
-            """
-            SELECT category, SUM(refund_amount) AS refund_rate,
-                   status, 0 AS marker, 'refunded' AS state
-            FROM orders
-            GROUP BY category
-            ORDER BY refund_rate DESC
-            LIMIT 5
-            """,
-            {
-                "aggregate ratio expression is required",
-                "conditional refund logic inside an aggregate is required",
-            },
-        ),
-    ],
-)
-def test_case_failures_rejects_term_complete_but_wrong_structure(
-    case_id, sql, expected_failures
+def test_case_failures_rejects_term_complete_sql_with_wrong_results(
+    case_id, wrong_sql, actual_rows, expected_failure
 ):
     case = next(item for item in rag_ab.CASES if item["id"] == case_id)
+    label = case["label_field"]
+    metric = case["metric_field"]
+    expected_rows = [
+        {label: "A", metric: 10.0 if case_id != "category_refund_rate" else 0.1},
+        {label: "B", metric: 8.0 if case_id != "category_refund_rate" else 0.2},
+    ]
 
     failures = rag_ab._case_failures(
         case,
-        {"sql": sql, "data": [{"value": 1}], "error": None},
+        {"sql": wrong_sql, "data": actual_rows, "error": None},
         require_knowledge=False,
+        expected_rows=expected_rows,
     )
 
-    assert expected_failures <= set(failures)
+    assert expected_failure in failures
+
+
+def test_case_failures_rejects_wrong_row_count_and_ambiguous_metric():
+    case = next(
+        item for item in rag_ab.CASES if item["id"] == "paid_sales_30_day_ranking"
+    )
+    expected_rows = [
+        {"product_name": "A", "sales_amount": 10.0},
+        {"product_name": "B", "sales_amount": 8.0},
+    ]
+    actual_rows = [{"product_name": "A", "revenue": 10.0, "average": 5.0}]
+
+    failures = rag_ab._case_failures(
+        case,
+        {"sql": case["reference_sql"], "data": actual_rows, "error": None},
+        require_knowledge=False,
+        expected_rows=expected_rows,
+    )
+
+    assert "result row count differs from reference" in failures
+    assert "primary metric is missing or ambiguous" in failures
+
+
+def test_reference_rows_executes_each_reference_query_once():
+    calls = []
+
+    class FakeDatabase:
+        def execute_select(self, sql):
+            calls.append(sql)
+            return [{"value": len(calls)}]
+
+    rows = rag_ab._reference_rows(FakeDatabase())
+
+    assert calls == [case["reference_sql"] for case in rag_ab.CASES]
+    assert list(rows) == [case["id"] for case in rag_ab.CASES]
 
 
 def test_case_failures_accepts_required_tables_columns_and_literals():
