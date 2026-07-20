@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -173,6 +174,87 @@ def test_refund_rate_tolerance_accepts_unrounded_equivalent_but_rejects_wrong_ra
     assert "primary metric differs from reference" in wrong_failures
 
 
+def test_equivalent_date_literal_spelling_passes_result_oracle():
+    case = next(
+        item for item in rag_ab.CASES if item["id"] == "paid_sales_30_day_ranking"
+    )
+    expected_rows = [{"product_name": "A", "sales_amount": 10.0}]
+
+    failures = rag_ab._case_failures(
+        case,
+        {
+            "sql": case["reference_sql"].replace("-30 days", "-30 day"),
+            "data": [{"product_name": "A", "total_amount": 10.0}],
+            "error": None,
+        },
+        require_knowledge=False,
+        expected_rows=expected_rows,
+    )
+
+    assert failures == []
+
+
+@pytest.mark.parametrize("actual_label", ["product", "item"])
+def test_equivalent_label_alias_or_unique_text_field_passes_result_oracle(actual_label):
+    case = dict(
+        next(
+            item
+            for item in rag_ab.CASES
+            if item["id"] == "paid_sales_30_day_ranking"
+        )
+    )
+    if actual_label == "item":
+        case.pop("label_aliases")
+    expected_rows = [{"product_name": "A", "sales_amount": 10.0}]
+    sql = case["reference_sql"].replace(
+        "SELECT product_name,", f"SELECT product_name AS {actual_label},"
+    )
+
+    failures = rag_ab._case_failures(
+        case,
+        {
+            "sql": sql,
+            "data": [{actual_label: "A", "total_amount": 10.0}],
+            "error": None,
+        },
+        require_knowledge=False,
+        expected_rows=expected_rows,
+    )
+
+    assert failures == []
+
+
+def test_refund_reference_has_stable_top_five_tie_break(tmp_path):
+    case = next(item for item in rag_ab.CASES if item["id"] == "category_refund_rate")
+    assert "前5" in case["question"]
+    assert "退款订单数降序" in case["question"]
+    assert "品类名称升序" in case["question"]
+    assert "refund_rate desc, refund_count desc, category asc" in " ".join(
+        case["reference_sql"].lower().split()
+    )
+
+    path = tmp_path / "ties.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE orders (category TEXT, refund_amount REAL, status TEXT)")
+        conn.executemany(
+            "INSERT INTO orders VALUES (?, ?, ?)",
+            [
+                ("A", 10, "refunded"),
+                ("A", 10, "refunded"),
+                ("B", 10, "refunded"),
+                *[
+                    row
+                    for category in "CDEFG"
+                    for row in ((category, 10, "refunded"), (category, 0, "paid"))
+                ],
+            ],
+        )
+
+    rows = SQLiteDatabase(path).execute_select(case["reference_sql"])
+
+    assert [row["category"] for row in rows] == ["A", "B", "C", "D", "E"]
+
+
 def test_reference_rows_executes_each_reference_query_once():
     calls = []
 
@@ -187,11 +269,10 @@ def test_reference_rows_executes_each_reference_query_once():
     assert list(rows) == [case["id"] for case in rag_ab.CASES]
 
 
-def test_case_failures_accepts_required_tables_columns_and_literals():
+def test_case_failures_accepts_required_tables_and_columns():
     case = {
         "required_tables": {"orders", "products"},
         "required_columns": {"brand", "amount", "cost_price", "product_id", "id", "status"},
-        "required_literals": {"paid"},
     }
     result = {
         "sql": """
@@ -215,7 +296,6 @@ def test_case_failures_reports_execution_semantic_and_retrieval_failures():
     case = {
         "required_tables": {"orders"},
         "required_columns": {"category", "refund_amount", "status"},
-        "required_literals": {"refunded", "0"},
     }
     result = {
         "sql": "SELECT category, COUNT(*) FROM orders GROUP BY category LIMIT 5",
@@ -228,7 +308,6 @@ def test_case_failures_reports_execution_semantic_and_retrieval_failures():
         "agent error",
         "query returned no data",
         "missing columns: refund_amount, status",
-        "missing literals: 0, refunded",
         "knowledge was not retrieved",
     ]
 
@@ -313,6 +392,30 @@ def test_copy_eval_database_repoints_source_one_without_changing_source(
     assert copied.path == copied_path
     assert copied.get_data_source(1)["database_url"] == str(copied_path)
     assert source.get_data_source(1)["database_url"] == str(source_path)
+
+
+def test_copy_eval_database_includes_committed_uncheckpointed_wal_rows(
+    monkeypatch, tmp_path
+):
+    source_path = tmp_path / "source-wal.db"
+    SQLiteDatabase(source_path).initialize()
+    writer = sqlite3.connect(source_path)
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE wal_marker (value TEXT NOT NULL)")
+        writer.execute("INSERT INTO wal_marker VALUES ('committed-in-wal')")
+        writer.commit()
+        assert Path(f"{source_path}-wal").stat().st_size > 0
+        monkeypatch.setattr(rag_ab, "DEFAULT_DATABASE_PATH", source_path)
+
+        copied = rag_ab._copy_eval_database(tmp_path / "copied-wal.db")
+
+        assert copied.execute_select("SELECT value FROM wal_marker") == [
+            {"value": "committed-in-wal"}
+        ]
+    finally:
+        writer.close()
 
 
 def test_sql_only_client_delegates_generation_and_skips_analysis_api():

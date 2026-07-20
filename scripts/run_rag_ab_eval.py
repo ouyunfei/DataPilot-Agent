@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-import shutil
+import sqlite3
 import sys
 import tempfile
 from numbers import Real
@@ -52,12 +52,12 @@ CASES = [
             LIMIT 5
         """,
         "label_field": "product_name",
+        "label_aliases": {"product_name", "product", "product_label"},
         "metric_field": "sales_amount",
         "metric_aliases": {"sales_amount", "total_amount", "total_sales", "sales"},
         "metric_tolerance": 0.01,
         "required_tables": {"orders"},
         "required_columns": {"product_name", "amount", "status", "created_at"},
-        "required_literals": {"paid", "-30 days"},
     },
     {
         "id": "gross_profit_by_brand",
@@ -72,6 +72,7 @@ CASES = [
             LIMIT 5
         """,
         "label_field": "brand",
+        "label_aliases": {"brand", "brand_name"},
         "metric_field": "gross_profit",
         "metric_aliases": {"gross_profit", "total_gross_profit", "profit"},
         "metric_tolerance": 0.01,
@@ -84,11 +85,13 @@ CASES = [
             "id",
             "status",
         },
-        "required_literals": {"paid"},
     },
     {
         "id": "category_refund_rate",
-        "question": "想看各商品品类的退款占比排行，退款应按发生退款的订单来认定。",
+        "question": (
+            "请按退款率从高到低列出前5个商品品类；退款率相同时按退款订单数降序、"
+            "品类名称升序，退款订单按发生退款认定。"
+        ),
         "reference_sql": """
             SELECT category,
                    COUNT(*) AS order_count,
@@ -98,16 +101,16 @@ CASES = [
                                   THEN 1 ELSE 0 END) * 1.0 / COUNT(*), 4) AS refund_rate
             FROM orders
             GROUP BY category
-            ORDER BY refund_rate DESC, refund_count DESC
+            ORDER BY refund_rate DESC, refund_count DESC, category ASC
             LIMIT 5
         """,
         "label_field": "category",
+        "label_aliases": {"category", "category_name"},
         "metric_field": "refund_rate",
         "metric_aliases": {"refund_rate", "rate"},
         "metric_tolerance": 0.0001,
         "required_tables": {"orders"},
         "required_columns": {"category", "refund_amount", "status"},
-        "required_literals": {"refunded", "0"},
     },
 ]
 
@@ -142,11 +145,10 @@ def _case_failures(
         failures.append("query returned no data")
 
     expression = _parse_sql(result.get("sql", ""))
-    tables, columns, literals = _sql_terms(expression)
+    tables, columns = _sql_terms(expression)
     for label, required, actual in (
         ("tables", case["required_tables"], tables),
         ("columns", case["required_columns"], columns),
-        ("literals", case["required_literals"], literals),
     ):
         missing = sorted(required - actual)
         if missing:
@@ -169,13 +171,12 @@ def _parse_sql(sql: str) -> exp.Expression | None:
 
 def _sql_terms(
     expression: exp.Expression | None,
-) -> tuple[set[str], set[str], set[str]]:
+) -> tuple[set[str], set[str]]:
     if expression is None:
-        return set(), set(), set()
+        return set(), set()
     return (
         {table.name.lower() for table in expression.find_all(exp.Table)},
         {column.name.lower() for column in expression.find_all(exp.Column)},
-        {str(literal.this).lower() for literal in expression.find_all(exp.Literal)},
     )
 
 
@@ -188,9 +189,11 @@ def _result_failures(
     if len(actual_rows) != len(expected_rows):
         failures.append("result row count differs from reference")
 
-    label_field = case["label_field"]
-    if [row.get(label_field) for row in actual_rows] != [
-        row.get(label_field) for row in expected_rows
+    label_field = _actual_label_field(case, actual_rows)
+    if label_field is None:
+        failures.append("result label is missing or ambiguous")
+    elif [row.get(label_field) for row in actual_rows] != [
+        row.get(case["label_field"]) for row in expected_rows
     ]:
         failures.append("ordered labels differ from reference")
 
@@ -207,6 +210,28 @@ def _result_failures(
     ):
         failures.append("primary metric differs from reference")
     return failures
+
+
+def _actual_label_field(
+    case: dict[str, Any], rows: list[dict[str, Any]]
+) -> str | None:
+    if not rows:
+        return None
+    keys = set.intersection(*(set(row) for row in rows))
+    aliases = {
+        key
+        for key in keys
+        if key.lower() in case.get("label_aliases", set())
+        and all(isinstance(row[key], str) for row in rows)
+    }
+    if len(aliases) == 1:
+        return aliases.pop()
+    if aliases:
+        return None
+    text_fields = {
+        key for key in keys if all(isinstance(row[key], str) for row in rows)
+    }
+    return text_fields.pop() if len(text_fields) == 1 else None
 
 
 def _actual_metric_field(
@@ -289,10 +314,17 @@ def _precondition_error() -> str | None:
 
 
 def _copy_eval_database(destination: Path) -> SQLiteDatabase:
-    shutil.copy2(DEFAULT_DATABASE_PATH, destination)
+    with sqlite3.connect(DEFAULT_DATABASE_PATH) as source_conn, sqlite3.connect(
+        destination
+    ) as target_conn:
+        source_conn.backup(target_conn)
     db = SQLiteDatabase(destination)
-    source = db.get_data_source(1)
-    if not source or source["db_type"] != "sqlite" or not source["is_default"]:
+    data_source = db.get_data_source(1)
+    if (
+        not data_source
+        or data_source["db_type"] != "sqlite"
+        or not data_source["is_default"]
+    ):
         raise RuntimeError("Default data source 1 is unavailable")
     db.update_data_source(1, database_url=str(destination))
     return db
