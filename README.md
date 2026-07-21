@@ -1,296 +1,86 @@
 # DataPilot Agent
 
-基于 LangGraph 的智能数据分析 Agent。用户用自然语言提出业务数据问题，系统自动完成表结构理解、DeepSeek SQL 生成、SQL 安全校验、SQL 执行和中文分析总结。
+面向业务数据分析的 **自然语言问数后端 Agent**。
 
-这个项目不是普通聊天机器人，而是面向业务数据查询和分析场景的后端 Agent。当前版本默认接入 DeepSeek，MySQL 示例库包含 `orders`、`users`、`products` 三张表，并使用 SQLGlot 做 AST 级 SQL 安全校验。
+用户输入中文问题，系统自动理解数据表、生成安全 SQL、查询 MySQL，并返回结构化数据、中文结论、图表建议和规则洞察。
 
-## 功能特性
+## 核心亮点
 
-- FastAPI 后端服务
-- LangGraph 编排数据分析工作流
-- DeepSeek 生成 SQL、SQL 解释和中文分析结论
-- MySQL 自动初始化订单、用户、商品三张示例表
-- MySQL 默认数据源；PostgreSQL 作为可选数据源能力保留
-- SQLGlot AST 安全校验
-- 强制 `LIMIT`，最大返回 100 行
-- 禁止 `SELECT *` 和非白名单表访问
-- 数据源管理：支持 MySQL / PostgreSQL 连接、目录读取和只读查询
-- 表权限白名单：每个数据源独立配置允许查询的表
-- 字段级权限白名单：每个数据源独立配置允许查询的字段
-- 数据目录接口：查看可查询表、字段、字段类型和字段说明
-- 查询保护增强：SQL 执行超时、错误分类和日志记录
-- MySQL 元数据库：平台配置、日志、会话和默认业务数据源都落到 MySQL
-- 指标管理：配置销售额、退款率、客单价、毛利、订单数等业务口径
-- 语义层把启用指标动态注入给 Agent
-- 高频问题优先命中可信 SQL
-- Qdrant Local 本地 RAG：按 `data_source_id` 隔离 Schema、指标、可信 SQL 和高质量历史问答四类知识
-- 本地 `BAAI/bge-small-zh-v1.5` Embedding；知识库不可用或无召回时 fail-open 回退原查询流程
-- 查询日志、反馈、会话和统计沉淀到平台元数据库
-- 查询日志列表和用户反馈接口
-- 多轮追问：返回并复用 `session_id`，把最近会话上下文注入 SQL 生成
-- 查询统计接口：统计成功率、失败数、图表类型分布和高频问题
-- 健康检查返回数据库和 DeepSeek 配置状态，不暴露 API key
-- 安全策略自检接口，便于展示 SQL 防护规则
-- 根据结果字段推荐图表类型
-- 异常 / 趋势发现：自动识别峰值、明显下降、退款率异常和 Top 差距
-- Docker 一键启动
-- GitHub Actions 自动运行测试
-- 离线确定性 eval 验证 Text-to-SQL 工程链路；可选真实 RAG A/B 单独衡量效果
-- `POST /api/chat` 返回 SQL、SQL 解释、查询数据、中文分析结论和错误信息
-- 单元测试覆盖 SQL 安全、MySQL 元数据和接口调用
+- **Text-to-SQL Agent**：LangGraph 编排 `schema -> knowledge -> SQL -> validate -> execute -> analyze`。
+- **默认 MySQL**：`orders / users / products` 示例业务库和平台元数据库默认落 MySQL。
+- **SQL 安全防护**：SQLGlot AST 校验，只允许单条 `SELECT`，强制 `LIMIT 100`，表/字段白名单控制。
+- **语义层 + 可信答案**：指标口径可配置，高频问题可优先命中可信 SQL。
+- **Local RAG**：Qdrant Local + `BAAI/bge-small-zh-v1.5` 召回 Schema、指标、可信 SQL、优质历史问答。
+- **工程闭环**：FastAPI、Docker Compose、pytest、离线 eval、GitHub Actions CI。
 
-## 项目结构
+## 技术栈
 
-```text
-DataPilot-Agent/
-├── app/
-│   ├── agent/
-│   │   └── workflow.py          # LangGraph 数据分析工作流
-│   ├── api/
-│   │   └── routes.py            # FastAPI 路由
-│   ├── core/
-│   │   └── config.py            # 配置和环境变量
-│   ├── db/
-│   │   ├── database.py          # 数据源公共逻辑、schema 获取、查询执行
-│   │   ├── mysql.py             # MySQL 连接、目录读取、查询执行
-│   │   ├── meta_mysql.py        # MySQL 平台元数据库
-│   │   └── postgres.py          # PostgreSQL 连接、目录读取、查询执行
-│   ├── schemas/
-│   │   └── chat.py              # Pydantic 请求/响应模型
-│   ├── services/
-│   │   ├── knowledge.py         # Qdrant Local 知识构建、检索和本地 BGE Embedding
-│   │   ├── llm.py               # DeepSeek LLM 客户端
-│   │   ├── semantic.py          # 语义层上下文、可信答案和图表推荐
-│   │   ├── insights.py          # 异常 / 趋势洞察规则
-│   │   └── sql_validator.py     # SQLGlot 安全校验
-│   └── main.py                  # FastAPI 应用入口
-├── docs/
-│   ├── mvp-design.md
-│   ├── qdrant-local-rag-requirements.md
-│   ├── storage-architecture-roadmap.md
-│   └── superpowers/
-├── evals/
-│   └── questions.json          # Text-to-SQL 评测问题集
-├── scripts/
-│   ├── rebuild_knowledge_index.py # 重建本地知识索引
-│   └── run_evals.py              # MySQL 默认链路 eval 与合成 RAG wiring smoke
-├── tests/
-├── .github/workflows/ci.yml
-├── Dockerfile
-├── docker-compose.yml
-├── docker/mysql/init.sql        # MySQL 示例库初始化脚本
-├── docker/postgres/init.sql     # PostgreSQL 示例库初始化脚本
-├── .env.example
-└── requirements.txt
-```
-
-## 工作流设计
-
-```text
-retrieve_schema -> retrieve_knowledge -> generate_sql -> validate_sql -> execute_sql -> analyze_result
-```
-
-节点职责：
-
-- `retrieve_schema`：读取三张表结构、字段说明、表关系和启用指标口径
-- `retrieve_knowledge`：按当前 `data_source_id` 召回可查询知识；失败或无结果时返回空上下文继续执行
-- `generate_sql`：调用 DeepSeek，根据用户问题和 schema 生成 SQL 与 SQL 解释
-- `validate_sql`：使用 SQLGlot 校验 SQL 安全性，并强制 `LIMIT`
-- `execute_sql`：执行已校验 SQL 并返回查询结果
-- `analyze_result`：调用 DeepSeek，基于查询结果和规则洞察生成中文业务分析结论
-
-如果 `validate_sql` 发现危险 SQL，工作流会直接跳过 `execute_sql`，返回错误信息。
-
-## 数据库设计
-
-Docker MySQL 启动时执行 `docker/mysql/init.sql`，初始化业务示例表和只读账号。
-
-`users` 用户维度表：
-
-| 字段 | 说明 |
+| 模块 | 技术 |
 | --- | --- |
-| `id` | 用户 ID |
-| `name` | 用户姓名 |
-| `city` | 常驻城市 |
-| `level` | 用户等级 |
-| `registered_at` | 注册日期 |
+| API | FastAPI / Pydantic |
+| Agent | LangGraph |
+| LLM | DeepSeek |
+| 数据库 | MySQL 默认，PostgreSQL 可选 |
+| SQL 安全 | SQLGlot |
+| RAG | Qdrant Local / sentence-transformers |
+| 测试 | pytest / deterministic evals |
 
-`products` 商品维度表：
+## 快速启动
 
-| 字段 | 说明 |
-| --- | --- |
-| `id` | 商品 ID |
-| `product_name` | 商品名称 |
-| `category` | 商品品类 |
-| `brand` | 品牌 |
-| `cost_price` | 成本价 |
-| `list_price` | 标价 |
-
-`orders` 订单事实表：
-
-| 字段 | 说明 |
-| --- | --- |
-| `id` | 订单 ID |
-| `user_id` | 用户 ID，关联 `users.id` |
-| `product_id` | 商品 ID，关联 `products.id` |
-| `product_name` | 商品名称 |
-| `category` | 商品品类 |
-| `city` | 订单城市 |
-| `amount` | 订单金额 |
-| `status` | 订单状态 |
-| `created_at` | 下单时间 |
-| `refund_amount` | 退款金额 |
-
-`metrics` 指标配置表默认初始化销售额、退款率、客单价、毛利和订单数。启用状态的指标会被注入 Agent 的语义层：
-
-| 字段 | 说明 |
-| --- | --- |
-| `metric_key` | 指标唯一标识 |
-| `name` | 指标中文名 |
-| `expression` | 指标计算口径 |
-| `description` | 业务说明 |
-| `enabled` | 是否启用 |
-
-## 本地启动
-
-建议使用虚拟环境：
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-复制配置文件：
+### Docker 推荐
 
 ```bash
 copy .env.example .env
 ```
 
-在 `.env` 中填写 DeepSeek API key 和 MySQL 元数据库 URL：
-
-```env
-DEEPSEEK_API_KEY=your_deepseek_api_key
-DEEPSEEK_MODEL=deepseek-v4-flash
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_TIMEOUT_SECONDS=30
-QUERY_TIMEOUT_SECONDS=5
-QDRANT_PATH=data/qdrant
-QDRANT_COLLECTION=datapilot_knowledge_bge_small_zh_v15
-EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
-KNOWLEDGE_TOP_K=5
-META_DATABASE_URL=mysql://root:datapilot_root123@127.0.0.1:3307/datapilot
-DEFAULT_MYSQL_DATA_SOURCE_URL=mysql://datapilot_ro:datapilot123@127.0.0.1:3307/datapilot
-```
-
-启动服务：
-
-```bash
-uvicorn app.main:app --reload
-```
-
-默认访问：
-
-- 健康检查：http://127.0.0.1:8000/health
-- Swagger 文档：http://127.0.0.1:8000/docs
-
-## MySQL 元数据库
-
-平台配置、指标、日志、反馈、会话和默认业务数据源都使用 MySQL；启动必须配置 `META_DATABASE_URL`。
-
-启动前先创建库；脚本不会自动建库：
-
-```sql
-CREATE DATABASE datapilot DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-```
-
-配置：
-
-```env
-META_DATABASE_URL=mysql://root:datapilot_root123@127.0.0.1:3307/datapilot
-DEFAULT_MYSQL_DATA_SOURCE_URL=mysql://datapilot_ro:datapilot123@127.0.0.1:3307/datapilot
-```
-
-启动后 5 张平台表会在 MySQL 中初始化：`data_sources`、`metrics`、`query_logs`、`chat_sessions`、`chat_messages`。默认数据源 `default_mysql` 指向 `DEFAULT_MYSQL_DATA_SOURCE_URL`，业务查询仍只允许 `SELECT`。
-
-## Local RAG
-
-依赖已经包含在 `requirements.txt`，安装方式仍是：
-
-```bash
-pip install -r requirements.txt
-```
-
-索引包含四类知识：
-
-- `schema`：数据源的表和字段元数据；不可查询项会标记 `queryable=false`，检索只召回白名单允许的元数据。
-- `metric`：启用且表达式能归属到当前数据源白名单表、字段的指标。
-- `trusted_sql`：通过当前 MySQL 数据源表、字段白名单校验的可信 SQL。
-- `historical_qa`：当前 `data_source_id` 下已点赞、执行成功且问题、SQL、回答完整，并通过当前数据源表/字段白名单校验的历史问答；旧日志缺少数据源或完整内容时跳过。
-
-配置：
-
-```env
-QDRANT_PATH=data/qdrant
-QDRANT_COLLECTION=datapilot_knowledge_bge_small_zh_v15
-EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
-KNOWLEDGE_TOP_K=5
-```
-
-停止后端后重建索引：
-
-```bash
-python scripts/rebuild_knowledge_index.py
-```
-
-脚本重建 Collection，并输出 `schema`、`metric`、`trusted_sql`、`historical_qa` 和 `total` 数量。首次运行会从 Hugging Face 下载 `BAAI/bge-small-zh-v1.5`，后续使用本地缓存；模型固定生成 512 维向量，Qdrant 使用 Cosine 距离，不调用外部 Embedding API，也不支持运行时切换模型。不同模型必须使用不同 Collection 并重建索引。
-
-Qdrant 索引是重建时快照，没有自动同步或后台任务。数据源表/字段白名单变化，指标创建、更新、删除或启停，或者查询反馈变化后，都要先停止后端，再运行 `python scripts/rebuild_knowledge_index.py`。重建前旧知识可能仍进入 Prompt，但生成的 SQL 仍不能绕过当前 SQL 校验器和表/字段白名单执行。
-
-Qdrant Local 数据保存在 `data/qdrant/`，该目录已被 Git 忽略。需要清理时，先停止后端，再删除整个 `data/qdrant/` 目录并运行重建命令。Local Mode 的同一目录不能被多个进程同时打开，因此后端运行时不要重建；需要多实例或在线重建时迁移到 Qdrant Server/Cloud。本阶段 `docker-compose.yml` 不启动 Qdrant 服务。
-
-每次检索都使用 Qdrant Payload Filter 强制限定当前 `data_source_id` 和 `queryable=true`。召回内容只作为长度受限的参考上下文，不能覆盖 SQL 安全规则；所有 SQL 仍经过 SQLGlot、表/字段白名单、只读、`LIMIT 100` 和执行超时保护。
-
-知识目录或 Collection 不存在、Qdrant 查询失败、Embedding 模型加载失败、当前数据源无知识或检索结果为空时，系统自动使用空知识上下文继续原流程。客户端只看到空 `knowledge_sources`，不会收到内部异常类型、本地路径、知识正文、向量或连接密钥。
-
-## Docker 启动
-
-先复制配置文件：
-
-```bash
-copy .env.example .env
-```
-
-如需真实调用 DeepSeek，在 `.env` 中填入自己的 API key。`docker compose up --build` 会自动把后端容器内的 MySQL 地址覆盖为服务名 `mysql`；本机直连 Docker MySQL 时使用 `127.0.0.1:3307`。不要把 `.env` 提交到 GitHub。
-
-启动：
+如需真实调用 DeepSeek，填写 `.env` 中的 `DEEPSEEK_API_KEY`，然后启动：
 
 ```bash
 docker compose up --build
 ```
 
-PostgreSQL 是可选数据源示例，需要时用 profile 启动：
+访问：
+
+- API Health: <http://127.0.0.1:8000/health>
+- Swagger: <http://127.0.0.1:8000/docs>
+
+Docker 会启动后端和 MySQL，并初始化示例表、平台表、默认指标和默认数据源。
+
+### 本地开发
 
 ```bash
-docker compose --profile postgres up -d postgres
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env
+uvicorn app.main:app --reload
 ```
 
-只启动本地 MySQL 示例库：
+本地直连 Docker MySQL 时默认端口是 `3307`：
 
 ```bash
 docker compose up -d mysql
 ```
 
-启动后访问：
+## 关键配置
 
-- http://127.0.0.1:8000/health
-- http://127.0.0.1:8000/docs
+```env
+DEEPSEEK_API_KEY=your_deepseek_api_key
+DEEPSEEK_MODEL=deepseek-v4-flash
+META_DATABASE_URL=mysql://root:datapilot_root123@127.0.0.1:3307/datapilot
+DEFAULT_MYSQL_DATA_SOURCE_URL=mysql://datapilot_ro:datapilot123@127.0.0.1:3307/datapilot
+QDRANT_PATH=data/qdrant
+QDRANT_COLLECTION=datapilot_knowledge_bge_small_zh_v15
+EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+KNOWLEDGE_TOP_K=5
+QUERY_TIMEOUT_SECONDS=5
+```
+
+`.env` 不要提交到仓库。
 
 ## 接口示例
 
-### 自然语言问数
-
-请求：
+自然语言问数：
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/api/chat" ^
@@ -298,404 +88,80 @@ curl -X POST "http://127.0.0.1:8000/api/chat" ^
   -d "{\"question\":\"最近 30 天销售额最高的 5 个商品是什么？\"}"
 ```
 
-响应示例：
+响应会包含：
 
 ```json
 {
-  "question": "最近 30 天销售额最高的 5 个商品是什么？",
-  "session_id": "0b6f6a50-6f8d-4b2f-a1af-b1f8db663ab4",
-  "data_source_id": 1,
-  "sql": "SELECT product_name, ROUND(SUM(amount), 2) AS total_amount, COUNT(*) AS order_count FROM orders WHERE status = 'paid' GROUP BY product_name ORDER BY total_amount DESC LIMIT 5",
-  "sql_explanation": "按商品名称分组，统计已支付订单销售额，并按销售额倒序取前 5 名。",
-  "data": [
-    {
-      "product_name": "人体工学椅",
-      "total_amount": 13311.55,
-      "order_count": 8
-    }
-  ],
-  "chart": {
-    "type": "bar",
-    "x": "product_name",
-    "y": "total_amount",
-    "reason": "排行或对比数据适合柱状图。"
-  },
-  "insights": [
-    {
-      "type": "gap",
-      "message": "Top 1 人体工学椅 比 Top 2 咖啡机 高 28.0%，头部差距明显。"
-    }
-  ],
-  "knowledge_sources": [
-    {
-      "knowledge_type": "metric",
-      "source_id": "1",
-      "title": "销售额",
-      "score": 0.87
-    }
-  ],
-  "trusted_answer": true,
-  "answer": "最近 30 天销售额最高的 Top 5 商品分别是人体工学椅、咖啡机、冲锋衣、空气炸锅和智能电饭煲，其中人体工学椅排名第一。Top 1 人体工学椅 比 Top 2 咖啡机 高 28.0%，头部差距明显。",
-  "error": null,
-  "error_code": null
+  "sql": "SELECT ... LIMIT 5",
+  "data": [],
+  "chart": { "type": "bar" },
+  "insights": [],
+  "knowledge_sources": [],
+  "answer": "中文业务分析结论",
+  "error": null
 }
 ```
 
-`knowledge_sources` 只返回 `knowledge_type`、`source_id`、`title` 和 `score`，不返回知识正文、向量、数据库地址或密钥。没有召回或 Local RAG 降级时返回：
-
-```json
-{
-  "knowledge_sources": []
-}
-```
-
-指定数据源时，在请求中加入 `data_source_id`；不传则使用当前默认数据源 `default_mysql`：
-
-```json
-{
-  "question": "最近 30 天销售额最高的 5 个商品是什么？",
-  "data_source_id": 1
-}
-```
-
-多轮追问时，把上一次响应里的 `session_id` 带回去：
-
-```json
-{
-  "question": "那按城市拆开看呢？",
-  "session_id": "0b6f6a50-6f8d-4b2f-a1af-b1f8db663ab4"
-}
-```
-
-可测试问题：
-
-- 最近 30 天销售额最高的 5 个商品是什么？
-- 哪个商品品类的退款率最高？
-- 最近一个月每天的销售额趋势如何？
-- 不同城市的订单金额排名如何？
-- 哪些用户的消费金额最高？
-- 哪个用户等级的客单价最高？
-- 哪个品牌的销售额最高？
-
-危险 SQL 拦截示例：
-
-```bash
-curl -X POST "http://127.0.0.1:8000/api/chat" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"question\":\"请删除所有订单数据\"}"
-```
-
-系统会返回错误信息，并且不会执行数据库查询。
-
-### 查询日志
-
-```bash
-curl "http://127.0.0.1:8000/api/query-logs"
-```
-
-返回最近查询的问题、SQL、命中可信答案情况、图表类型、行数、错误、耗时和创建时间。
-
-### 查询统计
-
-```bash
-curl "http://127.0.0.1:8000/api/query-stats"
-```
-
-返回总查询数、成功数、失败数、可信答案命中数、平均耗时、图表类型分布、反馈分布和高频问题，用于展示 Agent 的运营监控能力。
-
-### 用户反馈
-
-```bash
-curl -X POST "http://127.0.0.1:8000/api/query-logs/1/feedback" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"feedback\":\"like\",\"note\":\"结果准确\"}"
-```
-
-`feedback` 只支持 `like` 或 `dislike`，用于沉淀后续优化样本。
-
-### 安全策略自检
-
-```bash
-curl "http://127.0.0.1:8000/api/security/policies"
-```
-
-返回当前 SQL 安全策略，例如只允许 `SELECT`、禁止多语句、禁止 `SELECT *`、白名单表、白名单字段、最大 `LIMIT` 和查询超时。
-
-### 数据源管理
-
-```bash
-curl "http://127.0.0.1:8000/api/data-sources"
-```
-
-创建数据源：
-
-```bash
-curl -X POST "http://127.0.0.1:8000/api/data-sources" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"name\":\"orders_only\",\"db_type\":\"mysql\",\"database_url\":\"mysql://datapilot_ro:datapilot123@127.0.0.1:3307/datapilot\",\"allowed_tables\":[\"orders\"],\"allowed_columns\":{\"orders\":[\"id\",\"product_name\",\"amount\",\"created_at\"]}}"
-```
-
-测试数据源：
-
-```bash
-curl -X POST "http://127.0.0.1:8000/api/data-sources/1/test"
-```
-
-更新连接地址、白名单或默认状态：
-
-```bash
-curl -X PUT "http://127.0.0.1:8000/api/data-sources/2" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"allowed_tables\":[\"orders\"],\"allowed_columns\":{\"orders\":[\"id\",\"amount\",\"created_at\"]},\"is_default\":true}"
-```
-
-删除非默认数据源：
-
-```bash
-curl -X DELETE "http://127.0.0.1:8000/api/data-sources/2"
-```
-
-当前默认数据源不能直接取消默认状态或删除，需要先把其他数据源设置为默认。更新响应和列表响应会继续隐藏连接密码，脱敏后的 `***` 地址不能作为更新值提交。
-
-MySQL 数据源是默认能力，PostgreSQL 是可选能力；两者都会真实检查白名单表和字段，并支持 `/api/chat` 只读查询。MySQL 数据源必须显式提供每张白名单表的 `allowed_columns`。
-
-本地 Docker PostgreSQL 示例库连接串：
-
-```text
-postgresql://datapilot:datapilot123@127.0.0.1:5432/datapilot
-```
-
-如果后端也运行在 `docker compose` 容器内并启用了 postgres profile，使用服务名：
-
-```text
-postgresql://datapilot:datapilot123@postgres:5432/datapilot
-```
-
-创建 PostgreSQL 数据源：
-
-```bash
-curl -X POST "http://127.0.0.1:8000/api/data-sources" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"name\":\"local_postgres\",\"db_type\":\"postgresql\",\"database_url\":\"postgresql://datapilot:datapilot123@127.0.0.1:5432/datapilot\",\"allowed_tables\":[\"orders\",\"users\",\"products\"],\"allowed_columns\":{\"orders\":[\"id\",\"user_id\",\"product_id\",\"product_name\",\"category\",\"city\",\"amount\",\"status\",\"created_at\",\"refund_amount\"],\"users\":[\"id\",\"name\",\"city\",\"level\",\"registered_at\"],\"products\":[\"id\",\"product_name\",\"category\",\"brand\",\"cost_price\",\"list_price\"]}}"
-```
-
-测试 PostgreSQL 数据源：
-
-```bash
-curl -X POST "http://127.0.0.1:8000/api/data-sources/{id}/test"
-```
-
-指定 PostgreSQL 数据源问数：
-
-```json
-{
-  "question": "最近 30 天销售额最高的 5 个商品是什么？",
-  "data_source_id": 2
-}
-```
-
-本地 Docker MySQL 示例库连接串：
-
-```text
-mysql://datapilot_ro:datapilot123@127.0.0.1:3307/datapilot
-```
-
-如果后端运行在 `docker compose` 容器内，连接地址使用 `mysql://datapilot_ro:datapilot123@mysql:3306/datapilot`。宿主机端口默认是 `3307`，可通过 `MYSQL_PORT` 覆盖。
-
-创建 MySQL 数据源：
-
-```bash
-curl -X POST "http://127.0.0.1:8000/api/data-sources" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"name\":\"local_mysql\",\"db_type\":\"mysql\",\"database_url\":\"mysql://datapilot_ro:datapilot123@127.0.0.1:3307/datapilot\",\"allowed_tables\":[\"orders\",\"users\",\"products\"],\"allowed_columns\":{\"orders\":[\"id\",\"user_id\",\"product_id\",\"product_name\",\"category\",\"city\",\"amount\",\"status\",\"created_at\",\"refund_amount\"],\"users\":[\"id\",\"name\",\"city\",\"level\",\"registered_at\"],\"products\":[\"id\",\"product_name\",\"category\",\"brand\",\"cost_price\",\"list_price\"]}}"
-```
-
-创建和列表接口会把连接密码显示为 `***`。本地初始化脚本负责建表和造数，Agent 查询链路仍然只允许执行 `SELECT`；接入真实数据库时应使用只读账号。
-
-### 数据目录
-
-查看当前数据源可查询表：
-
-```bash
-curl "http://127.0.0.1:8000/api/catalog/tables"
-```
-
-查看字段目录和字段权限：
-
-```bash
-curl "http://127.0.0.1:8000/api/catalog/tables/products/columns"
-```
-
-指定数据源：
-
-```bash
-curl "http://127.0.0.1:8000/api/catalog/tables/products/columns?data_source_id=1"
-```
-
-### 指标管理
-
-```bash
-curl "http://127.0.0.1:8000/api/metrics"
-```
-
-新增指标：
-
-```bash
-curl -X POST "http://127.0.0.1:8000/api/metrics" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"metric_key\":\"repeat_order_count\",\"name\":\"复购订单数\",\"expression\":\"COUNT(orders.id)\",\"description\":\"重复购买订单数量。\"}"
-```
-
-禁用指标：
-
-```bash
-curl -X PUT "http://127.0.0.1:8000/api/metrics/1" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"enabled\":false}"
-```
-
-## SQL 安全策略
-
-SQL 执行前必须通过 `validate_sql`：
+常用接口：
+
+| 接口 | 说明 |
+| --- | --- |
+| `POST /api/chat` | 自然语言问数 |
+| `GET /api/query-logs` | 查询日志 |
+| `GET /api/query-stats` | 查询统计 |
+| `GET /api/data-sources` | 数据源管理 |
+| `GET /api/catalog/tables` | 数据目录 |
+| `GET /api/metrics` | 指标管理 |
+| `GET /api/security/policies` | SQL 安全策略 |
+
+## 安全策略
+
+所有生成 SQL 在执行前都会经过统一校验：
 
 - 只允许单条 `SELECT`
-- 禁止 `INSERT`、`UPDATE`、`DELETE`、`DROP`、`ALTER`、`TRUNCATE`
-- 禁止注释和多语句
+- 禁止 DDL / DML / 多语句 / 注释
 - 禁止 `SELECT *`
-- 只允许访问当前数据源配置的白名单表
-- 只允许访问当前数据源配置的白名单字段
-- 没有 `LIMIT` 时自动追加 `LIMIT 100`
-- `LIMIT` 超过 100 时自动收敛为 `LIMIT 100`
-- MySQL / PostgreSQL 查询执行默认超时时间为 `QUERY_TIMEOUT_SECONDS=5`
-- 使用 SQLGlot 做 AST 级别校验
+- 只允许访问当前数据源白名单表和字段
+- 自动追加或收敛到 `LIMIT 100`
+- 查询执行超时保护
 
-## 语义层、可信答案、查询日志、图表推荐和洞察
+## Local RAG
 
-后端会从 `metrics` 表读取启用指标并注入给 DeepSeek；常见问题命中可信 SQL；每次查询写入 `query_logs`；接口返回 `chart` 字段给未来前端使用。数据源白名单会同时作用于 schema 注入和 SQL 安全校验。
-
-`insights` 字段使用确定性规则生成，不让 LLM 编造异常结论。当前支持：
-
-- 日期趋势中的最高值
-- 相邻日期下降超过 30% 的明显波动
-- 品类退款率明显高于平均水平
-- Top 1 和 Top 2 差距是否明显
-
-## 运行测试
+重建本地知识索引：
 
 ```bash
-python -m pytest -q
+python scripts/rebuild_knowledge_index.py
 ```
 
-## eval 评测集
+知识库不可用、模型未下载、无召回或 Qdrant 异常时，系统会 fail-open 回到原始 Text-to-SQL 流程；SQL 安全规则始终生效。
 
-评测集位于：
-
-```text
-evals/questions.json
-```
-
-运行：
+## 验证
 
 ```bash
-python scripts/run_evals.py
-```
-
-脚本使用 MySQL 默认数据源和 fake LLM，不依赖真实 DeepSeek、Hugging Face 或已构建的 Qdrant Collection。它会检查 SQL 是否生成、安全校验是否通过、返回字段是否符合预期、图表类型是否正确。
-
-脚本同时包含一组 fake LLM + fake retriever 的配对 RAG 检查，只证明知识上下文已接入 Agent 工作流且能影响固定 SQL；这是合成 wiring smoke，不是真实模型质量基准。
-
-示例输出：
-
-```text
-Eval passed: 7/7
-Success rate: 100.00%
-```
-
-## GitHub Actions CI
-
-CI 配置位于：
-
-```text
-.github/workflows/ci.yml
-```
-
-每次 `push` 或 `pull_request` 会自动执行：
-
-```bash
-python -m pytest -q
-```
-
-测试使用 fake LLM，不需要配置真实 DeepSeek API key。
-
-## 秋招展示脚本
-
-1. 启动项目：
-
-```bash
-uvicorn app.main:app --reload
-```
-
-2. 打开 Swagger 或 Postman，先访问：
-
-```text
-GET http://127.0.0.1:8000/health
-```
-
-说明项目启动后会连接 MySQL 并初始化平台表，健康检查只返回 `deepseek_configured`，不会泄漏 API key。
-
-3. 演示自然语言问数：
-
-```text
-POST http://127.0.0.1:8000/api/chat
-Content-Type: application/json
-
-{
-  "question": "最近 30 天销售额最高的 5 个商品是什么？"
-}
-```
-
-讲解链路：LangGraph 获取 schema 和语义层，按数据源召回 Local RAG 参考知识，MySQL 高频问题优先命中可信 SQL，经过 SQLGlot 安全校验后执行 MySQL 或可选 PostgreSQL 查询，再生成中文 Top 5 总结、规则洞察和图表推荐。
-
-4. 演示危险 SQL 拦截：
-
-```json
-{
-  "question": "请删除所有订单数据"
-}
-```
-
-说明所有 SQL 在执行前必须经过安全校验，不安全时直接返回 `error`，不会查询数据库。
-
-5. 演示可运营闭环：
-
-```text
-GET http://127.0.0.1:8000/api/query-logs
-GET http://127.0.0.1:8000/api/query-stats
-GET http://127.0.0.1:8000/api/data-sources
-GET http://127.0.0.1:8000/api/catalog/tables
-GET http://127.0.0.1:8000/api/catalog/tables/products/columns
-GET http://127.0.0.1:8000/api/metrics
-POST http://127.0.0.1:8000/api/query-logs/{id}/feedback
-GET http://127.0.0.1:8000/api/security/policies
-```
-
-讲解查询日志和统计接口用于观察高频问题、失败问题、慢查询和图表使用分布，数据源白名单和字段白名单用于限制可查询数据范围，数据目录用于展示表字段元数据，指标管理让语义层从硬编码升级为可配置，用户反馈用于沉淀可信答案和优化语义层。
-
-6. 演示工程化能力：
-
-```text
-docker compose up --build
-docker compose up -d postgres
-docker compose up -d mysql
 python -m pytest -q
 python scripts/run_evals.py
 ```
 
-讲解 Docker 解决环境一致性，GitHub Actions 保证提交后自动测试；离线确定性 eval 检查工程链路，真实 DeepSeek RAG A/B 则单独报告正向、持平或负向结果。
+当前 eval 使用 fake LLM 和 MySQL 默认数据源，不依赖真实 DeepSeek 或已构建的 Qdrant Collection。
 
-## 后续扩展方向
+## 项目结构
 
-- Local RAG 需要多实例或在线重建时迁移到 Qdrant Server/Cloud
-- 加入 Redis：缓存 schema、热门查询结果和会话上下文
-- 加入 Celery：处理耗时查询、异步报表和定时分析任务
-- 多智能体拆分：Schema Agent、SQL Agent、SQL Review Agent、Insight Agent
+```text
+app/
+  api/        FastAPI 路由
+  agent/      LangGraph 工作流
+  db/         MySQL / PostgreSQL 数据源与平台元数据库
+  services/   LLM、SQL 校验、语义层、RAG、洞察
+  schemas/    Pydantic 模型
+docker/       MySQL / PostgreSQL 初始化脚本
+evals/        Text-to-SQL 评测集
+scripts/      eval 与知识索引脚本
+tests/        单元测试和 API 测试
+docs/         设计文档
+```
+
+## 进一步阅读
+
+- [MVP 设计](docs/mvp-design.md)
+- [Local RAG 需求](docs/qdrant-local-rag-requirements.md)
+- [存储架构路线图](docs/storage-architecture-roadmap.md)
