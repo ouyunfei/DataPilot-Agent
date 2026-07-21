@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.agent.workflow import DataAnalysisAgent
-from app.db.database import SQLiteDatabase
+from app.core.config import META_DATABASE_URL
+from app.db.database import DataPilotDatabase
+from app.db.meta_mysql import MySQLMetaDatabase
 from app.services.llm import SQLGeneration
 from app.services.sql_validator import SQLSafetyError, validate_select_sql
 
@@ -115,19 +116,22 @@ class RAGEvalKnowledgeRetriever:
 
 
 def main() -> int:
+    if not META_DATABASE_URL:
+        print("请先配置 META_DATABASE_URL")
+        return 1
+
     questions = json.loads((ROOT / "evals" / "questions.json").read_text(encoding="utf-8"))
     failures: list[str] = []
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        db = SQLiteDatabase(Path(tmp_dir) / "eval.db")
-        db.initialize()
-        agent = DataAnalysisAgent(db=db, llm=EvalLLMClient())
+    db = MySQLMetaDatabase(META_DATABASE_URL)
+    db.initialize()
+    agent = DataAnalysisAgent(db=db, llm=EvalLLMClient())
 
-        for item in questions:
-            result = agent.run(item["question"])
-            failures.extend(_check_case(item, result))
+    for item in questions:
+        result = agent.run(item["question"])
+        failures.extend(_check_case(item, result))
 
-        rag_off, rag_on, rag_execution_ok, rag_failures = _run_rag_comparison(db)
+    rag_off, rag_on, rag_execution_ok, rag_failures = _run_rag_comparison(db)
 
     passed = len(questions) - len({failure.split(':', 1)[0] for failure in failures})
     total = len(questions)
@@ -194,7 +198,7 @@ def _sql_for_question(question: str) -> str:
             ROUND(SUM(amount), 2) AS total_amount
         FROM orders
         WHERE status = 'paid'
-          AND created_at >= date('now', '-30 days')
+          AND created_at >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)
         GROUP BY created_at
         ORDER BY order_date
         LIMIT 30
@@ -263,7 +267,7 @@ def _sql_for_question(question: str) -> str:
     """
 
 
-def _run_rag_comparison(db: SQLiteDatabase) -> tuple[int, int, bool, list[str]]:
+def _run_rag_comparison(db: DataPilotDatabase) -> tuple[int, int, bool, list[str]]:
     llm = RAGEvalLLMClient()
     agents = (
         DataAnalysisAgent(db=db, llm=llm),

@@ -33,7 +33,7 @@ def validate_select_sql(
     sql: str,
     allowed_tables: set[str] | None = None,
     allowed_columns: dict[str, set[str]] | None = None,
-    dialect: str = "sqlite",
+    dialect: str = "mysql",
 ) -> str:
     allowed_tables = ALLOWED_TABLES if allowed_tables is None else allowed_tables
     normalized = sql.strip()

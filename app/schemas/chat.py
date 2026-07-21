@@ -112,7 +112,7 @@ class MetricUpdateRequest(BaseModel):
 
 class DataSourceCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    db_type: Literal["sqlite", "mysql", "postgresql"]
+    db_type: Literal["mysql", "postgresql"]
     database_url: str = Field(..., min_length=1, max_length=1000)
     allowed_tables: list[str] = Field(..., min_length=1)
     allowed_columns: dict[str, list[str]] | None = None

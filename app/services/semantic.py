@@ -13,7 +13,7 @@ TRUSTED_ANSWERS = {
             COUNT(*) AS order_count
         FROM orders
         WHERE status = 'paid'
-          AND created_at >= date('now', '-30 days')
+          AND created_at >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)
         GROUP BY product_name
         ORDER BY total_amount DESC
         LIMIT 5

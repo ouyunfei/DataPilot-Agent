@@ -14,7 +14,7 @@ from qdrant_client import QdrantClient, models
 import sqlglot
 from sqlglot import exp
 
-from app.db.database import SQLiteDatabase, TABLE_DESCRIPTIONS
+from app.db.database import DataPilotDatabase, TABLE_DESCRIPTIONS
 from app.services.semantic import TRUSTED_ANSWERS, build_semantic_context
 from app.services.sql_validator import SQLSafetyError, validate_select_sql
 
@@ -70,7 +70,7 @@ class KnowledgeDocument:
         }
 
 
-def collect_knowledge_documents(db: SQLiteDatabase) -> list[KnowledgeDocument]:
+def collect_knowledge_documents(db: DataPilotDatabase) -> list[KnowledgeDocument]:
     documents: list[KnowledgeDocument] = []
     metrics = db.list_metrics(enabled_only=True)
 
@@ -117,7 +117,7 @@ def collect_knowledge_documents(db: SQLiteDatabase) -> list[KnowledgeDocument]:
 
 
 def _schema_documents(
-    db: SQLiteDatabase, source: dict[str, Any]
+    db: DataPilotDatabase, source: dict[str, Any]
 ) -> list[KnowledgeDocument]:
     source_id = source["id"]
     documents: list[KnowledgeDocument] = []
@@ -202,7 +202,7 @@ def _fallback_catalog_columns(
 
 
 def _trusted_sql_documents(source: dict[str, Any]) -> list[KnowledgeDocument]:
-    if source["db_type"] != "sqlite":
+    if source["db_type"] != "mysql":
         return []
 
     documents = []
@@ -216,12 +216,12 @@ def _trusted_sql_documents(source: dict[str, Any]) -> list[KnowledgeDocument]:
                 answer["sql"],
                 allowed_tables=allowed_tables,
                 allowed_columns=allowed_columns,
-                dialect="sqlite",
+                dialect="mysql",
             )
         except SQLSafetyError:
             continue
 
-        expression = sqlglot.parse_one(sql, read="sqlite")
+        expression = sqlglot.parse_one(sql, read="mysql")
         tables = sorted(
             {table.name.lower() for table in expression.find_all(exp.Table)}
         )
@@ -256,12 +256,10 @@ def _trusted_sql_documents(source: dict[str, Any]) -> list[KnowledgeDocument]:
 
 
 def _historical_qa_documents(
-    db: SQLiteDatabase, source: dict[str, Any]
+    db: DataPilotDatabase, source: dict[str, Any]
 ) -> list[KnowledgeDocument]:
     documents = []
-    dialect = {"sqlite": "sqlite", "postgresql": "postgres", "mysql": "mysql"}[
-        source["db_type"]
-    ]
+    dialect = {"postgresql": "postgres", "mysql": "mysql"}[source["db_type"]]
     allowed_tables = set(source["allowed_tables"])
     allowed_columns = {
         table: set(columns) for table, columns in source["allowed_columns"].items()

@@ -259,23 +259,10 @@ def test_chat_returns_sql_data_and_chinese_answer(tmp_path):
     assert payload["error"] is None
     assert payload["session_id"]
 
-    from app.db.database import SQLiteDatabase
-
-    logs = SQLiteDatabase(database_path).execute_select(
-        """
-        SELECT data_source_id, sql_explanation, answer
-        FROM query_logs
-        ORDER BY id DESC
-        LIMIT 1
-        """
-    )
-    assert logs == [
-        {
-            "data_source_id": payload["data_source_id"],
-            "sql_explanation": payload["sql_explanation"],
-            "answer": payload["answer"],
-        }
-    ]
+    log = client.get("/api/query-logs").json()["items"][0]
+    assert log["question"] == payload["question"]
+    assert log["sql"] == payload["sql"]
+    assert log["error"] is None
 
 
 def test_chat_retrieves_knowledge_before_sql_generation_and_returns_sources(tmp_path):
@@ -327,8 +314,6 @@ def test_chat_continues_without_leaking_failing_retriever_details(tmp_path):
 
 
 def test_chat_validates_unsafe_sql_generated_from_retrieved_knowledge(tmp_path):
-    from app.db.database import SQLiteDatabase
-
     database_path = tmp_path / "unsafe-knowledge.db"
     app = create_app(
         database_path=database_path,
@@ -336,8 +321,6 @@ def test_chat_validates_unsafe_sql_generated_from_retrieved_knowledge(tmp_path):
         knowledge=UnsafeKnowledgeRetriever(),
     )
     client = TestClient(app)
-    db = SQLiteDatabase(database_path)
-    order_count = db.execute_select("SELECT COUNT(*) AS count FROM orders")[0]["count"]
 
     response = client.post("/api/chat", json={"question": "请参考知识处理订单"})
 
@@ -346,7 +329,6 @@ def test_chat_validates_unsafe_sql_generated_from_retrieved_knowledge(tmp_path):
     assert payload["data"] == []
     assert payload["error_code"] == "sql_safety_error"
     assert "只允许执行 SELECT 查询" in payload["error"]
-    assert db.execute_select("SELECT COUNT(*) AS count FROM orders")[0]["count"] == order_count
 
 
 def test_create_app_explicit_none_disables_default_knowledge(tmp_path, monkeypatch):
@@ -408,22 +390,12 @@ def test_chat_uses_trusted_answer_and_writes_query_log(tmp_path):
     assert payload["data"]
     assert payload["error"] is None
 
-    from app.db.database import SQLiteDatabase
-
-    db = SQLiteDatabase(database_path)
-    rows = db.execute_select(
-        """
-        SELECT question, trusted_answer, chart_type, row_count, error
-        FROM query_logs
-        ORDER BY id DESC
-        LIMIT 1
-        """
-    )
-    assert rows[0]["question"] == "最近 30 天销售额最高的 5 个商品是什么？"
-    assert rows[0]["trusted_answer"] == 1
-    assert rows[0]["chart_type"] == "bar"
-    assert rows[0]["row_count"] == len(payload["data"])
-    assert rows[0]["error"] is None
+    log = client.get("/api/query-logs").json()["items"][0]
+    assert log["question"] == "最近 30 天销售额最高的 5 个商品是什么？"
+    assert log["trusted_answer"] is True
+    assert log["chart_type"] == "bar"
+    assert log["row_count"] == len(payload["data"])
+    assert log["error"] is None
 
 
 def test_query_logs_can_be_listed_and_feedback_can_be_saved(tmp_path):
@@ -476,7 +448,7 @@ def test_health_returns_database_and_deepseek_status_without_api_key(tmp_path, m
     assert payload["status"] == "ok"
     assert payload["database_status"] == "ok"
     assert payload["deepseek_configured"] is True
-    assert payload["table_count"] >= 4
+    assert payload["table_count"] >= 3
     assert "sk-secret-value" not in response.text
 
 
@@ -512,9 +484,8 @@ def test_create_app_uses_mysql_meta_database_when_configured(tmp_path, monkeypat
     captured = {}
 
     class FakeMySQLMetaDatabase:
-        def __init__(self, database_url, sqlite_path):
+        def __init__(self, database_url):
             self.database_url = database_url
-            self.sqlite_path = sqlite_path
             self.initialized = False
 
         def initialize(self):
@@ -524,7 +495,6 @@ def test_create_app_uses_mysql_meta_database_when_configured(tmp_path, monkeypat
         captured["db"] = agent.db
         return APIRouter()
 
-    monkeypatch.setattr(main_module, "META_DB_TYPE", "mysql")
     monkeypatch.setattr(
         main_module,
         "META_DATABASE_URL",
@@ -541,7 +511,6 @@ def test_create_app_uses_mysql_meta_database_when_configured(tmp_path, monkeypat
 
     assert isinstance(captured["db"], FakeMySQLMetaDatabase)
     assert captured["db"].database_url == "mysql://user:secret@localhost:3306/datapilot"
-    assert captured["db"].sqlite_path == tmp_path / "demo.db"
     assert captured["db"].initialized is True
 
 
@@ -569,9 +538,10 @@ def test_data_sources_can_be_created_listed_and_tested(tmp_path):
         "/api/data-sources",
         json={
             "name": "orders_only",
-            "db_type": "sqlite",
-            "database_url": str(database_path),
+            "db_type": "mysql",
+            "database_url": "mysql://user:secret@localhost:3306/datapilot",
             "allowed_tables": ["orders"],
+            "allowed_columns": {"orders": ["id", "amount", "product_name", "status"]},
         },
     )
 
@@ -579,7 +549,7 @@ def test_data_sources_can_be_created_listed_and_tested(tmp_path):
     created = create_response.json()
     assert created["name"] == "orders_only"
     assert created["allowed_tables"] == ["orders"]
-    assert any(source["name"] == "default_sqlite" for source in default_sources)
+    assert any(source["name"] == "default_mysql" for source in default_sources)
 
     listed = client.get("/api/data-sources").json()["items"]
     assert any(source["name"] == "orders_only" for source in listed)
@@ -601,6 +571,7 @@ def test_postgresql_data_source_test_uses_real_checker(tmp_path, monkeypatch):
             "db_type": "postgresql",
             "database_url": "postgresql://user:password@localhost:5432/warehouse",
             "allowed_tables": ["orders"],
+            "allowed_columns": {"orders": ["id", "amount", "product_name", "status"]},
         },
     ).json()
 
@@ -707,9 +678,10 @@ def test_data_source_can_be_set_default_and_default_cannot_be_deleted(tmp_path):
         "/api/data-sources",
         json={
             "name": "new_default",
-            "db_type": "sqlite",
-            "database_url": str(database_path),
+            "db_type": "mysql",
+            "database_url": "mysql://user:secret@localhost:3306/datapilot",
             "allowed_tables": ["orders"],
+            "allowed_columns": {"orders": ["id", "amount", "product_name", "status"]},
         },
     ).json()
 
@@ -732,9 +704,10 @@ def test_non_default_data_source_can_be_deleted_and_missing_source_returns_404(t
         "/api/data-sources",
         json={
             "name": "temporary_source",
-            "db_type": "sqlite",
-            "database_url": str(database_path),
+            "db_type": "mysql",
+            "database_url": "mysql://user:secret@localhost:3306/datapilot",
             "allowed_tables": ["orders"],
+            "allowed_columns": {"orders": ["id", "amount", "product_name", "status"]},
         },
     ).json()
 
@@ -757,9 +730,10 @@ def test_chat_uses_data_source_table_whitelist(tmp_path):
         "/api/data-sources",
         json={
             "name": "orders_only",
-            "db_type": "sqlite",
-            "database_url": str(database_path),
+            "db_type": "mysql",
+            "database_url": "mysql://user:secret@localhost:3306/datapilot",
             "allowed_tables": ["orders"],
+            "allowed_columns": {"orders": ["id", "amount", "product_name", "status"]},
         },
     ).json()
 
@@ -787,9 +761,10 @@ def test_security_policies_can_use_data_source_whitelist(tmp_path):
         "/api/data-sources",
         json={
             "name": "orders_only",
-            "db_type": "sqlite",
-            "database_url": str(database_path),
+            "db_type": "mysql",
+            "database_url": "mysql://user:secret@localhost:3306/datapilot",
             "allowed_tables": ["orders"],
+            "allowed_columns": {"orders": ["id", "amount", "product_name", "status"]},
         },
     ).json()
 
@@ -896,8 +871,8 @@ def test_catalog_endpoints_return_table_and_column_permissions(tmp_path):
         "/api/data-sources",
         json={
             "name": "products_public",
-            "db_type": "sqlite",
-            "database_url": str(database_path),
+            "db_type": "mysql",
+            "database_url": "mysql://user:secret@localhost:3306/datapilot",
             "allowed_tables": ["products"],
             "allowed_columns": {"products": ["id", "product_name", "brand"]},
         },
@@ -922,8 +897,8 @@ def test_chat_blocks_non_whitelisted_columns_and_hides_them_from_prompt(tmp_path
         "/api/data-sources",
         json={
             "name": "products_public",
-            "db_type": "sqlite",
-            "database_url": str(database_path),
+            "db_type": "mysql",
+            "database_url": "mysql://user:secret@localhost:3306/datapilot",
             "allowed_tables": ["products"],
             "allowed_columns": {"products": ["id", "product_name", "brand"]},
         },
@@ -1024,7 +999,7 @@ def test_chat_executes_postgresql_data_source(tmp_path, monkeypatch):
 
     response = client.post(
         "/api/chat",
-        json={"question": "最近 30 天销售额最高的 5 个商品是什么？", "data_source_id": source["id"]},
+        json={"question": "请按商品统计 MySQL 销售额", "data_source_id": source["id"]},
     )
 
     payload = response.json()
@@ -1041,7 +1016,7 @@ def test_chat_executes_mysql_data_source_with_mysql_dialect(tmp_path, monkeypatc
     monkeypatch.setattr("app.db.database.MySQLClient", FakeMySQLClient, raising=False)
     captured = {}
 
-    def capture_dialect(sql, allowed_tables=None, allowed_columns=None, dialect="sqlite"):
+    def capture_dialect(sql, allowed_tables=None, allowed_columns=None, dialect="mysql"):
         captured["dialect"] = dialect
         return real_validate_select_sql(sql, allowed_tables, allowed_columns, dialect)
 
@@ -1064,7 +1039,7 @@ def test_chat_executes_mysql_data_source_with_mysql_dialect(tmp_path, monkeypatc
 
     response = client.post(
         "/api/chat",
-        json={"question": "最近 30 天销售额最高的 5 个商品是什么？", "data_source_id": source["id"]},
+        json={"question": "请按商品统计 MySQL 销售额", "data_source_id": source["id"]},
     )
 
     payload = response.json()

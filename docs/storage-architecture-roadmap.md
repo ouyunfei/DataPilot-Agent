@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-DataPilot 当前同时涉及 SQLite、PostgreSQL 和 MySQL。后续还计划接入 Qdrant 与 Redis，如果全部作为默认运行依赖，会增加部署、调试和维护成本，也容易让个人项目变成技术栈堆叠。
+DataPilot 当前默认运行已收口为 MySQL 元数据库 + MySQL 默认业务库；PostgreSQL 作为可选数据源能力保留。后续还计划按需接入 Qdrant 与 Redis，如果全部作为默认运行依赖，会增加部署、调试和维护成本，也容易让个人项目变成技术栈堆叠。
 
 长期目标是把默认存储收敛为三个职责互不重叠的组件：
 
@@ -89,7 +89,7 @@ Redis 只保存可以从 MySQL 或 Qdrant 重新生成的数据。
 
 ### SQLite
 
-当前 SQLite 仍保存平台元数据，不能直接删除。需要先把以下表迁移到 MySQL：
+SQLite 运行链路和兼容代码已删除。平台元数据、查询日志和会话都已统一落到 MySQL，涉及表包括：
 
 - `data_sources`
 - `metrics`
@@ -97,11 +97,11 @@ Redis 只保存可以从 MySQL 或 Qdrant 重新生成的数据。
 - `chat_sessions`
 - `chat_messages`
 
-迁移和回归验证完成后，再删除 SQLite 初始化、连接和迁移兼容代码。
+默认启动不再依赖 SQLite 初始化、连接或迁移脚本。
 
 ### PostgreSQL
 
-PostgreSQL 不再作为默认运行依赖。可以先保留适配器和测试，但从默认 Docker Compose 启动链路中移除。只有在明确不再需要多数据源展示和兼容能力时，才完全删除驱动、客户端、文档和测试。
+PostgreSQL 作为可选能力保留，不进入默认 Docker Compose 启动链路；需要时再单独启用。
 
 ## 5. 分阶段实施
 
@@ -109,7 +109,7 @@ PostgreSQL 不再作为默认运行依赖。可以先保留适配器和测试，
 
 - 使用 `qdrant-client` Local Mode 和 `data/qdrant/`，不部署独立 Qdrant 服务。
 - 使用本地 `BAAI/bge-small-zh-v1.5` 生成 512 维向量，每个 Embedding 模型对应独立 Collection。
-- 导入可查询 Schema 元数据、可归属的启用指标、白名单校验通过的 SQLite 可信 SQL，以及同数据源下点赞、成功、内容完整且通过白名单校验的历史问答。
+- 导入可查询 Schema 元数据、可归属的启用指标、白名单校验通过的 MySQL 可信 SQL，以及同数据源下点赞、成功、内容完整且通过白名单校验的历史问答。
 - 按 `data_source_id` 和 `queryable=true` 执行 Top-K 检索。
 - 在 LangGraph 中使用 `retrieve_knowledge` 节点；无目录、无 Collection、无结果或检索/模型异常时 fail-open 回退原流程。
 - 重建前停止后端，运行 `python scripts/rebuild_knowledge_index.py`，再启动后端。
@@ -119,10 +119,9 @@ PostgreSQL 不再作为默认运行依赖。可以先保留适配器和测试，
 
 ### 阶段二：MySQL 元数据库
 
-- 已实现兼容切换：默认运行已切到 MySQL；SQLite 仍保留为回滚和测试路径。
-- MySQL 库需先手动创建；当前目标库名为 `datapilot`。
-- 已提供 `scripts/migrate_sqlite_meta_to_mysql.py`，只迁移 `data_sources`、`metrics`、`query_logs`、`chat_sessions`、`chat_messages`。
-- 本阶段不迁移 `orders/users/products` 业务表，不删除 SQLite 代码，保留回滚路径。
+- 已完成：MySQL 作为平台元数据库和默认业务库。
+- 默认数据源 `default_mysql` 指向 MySQL 示例库。
+- 不再保留 SQLite 启动选择或迁移脚本。
 - 元数据库账号应为读写账号；业务数据源账号仍建议只给 `SELECT`。
 
 ### 阶段三：收敛关系型数据库
@@ -149,7 +148,7 @@ PostgreSQL 不再作为默认运行依赖。可以先保留适配器和测试，
 - 不让 Qdrant 替代关系型元数据库。
 - 不把 Redis 作为持久化事实来源。
 - 不在没有性能数据时实现复杂缓存一致性。
-- 不在迁移完成前直接删除 SQLite。
+- 不重新引入 SQLite 运行链路、脚本或测试口径。
 
 ## 7. 完成标准
 
@@ -157,4 +156,4 @@ PostgreSQL 不再作为默认运行依赖。可以先保留适配器和测试，
 - MySQL 是平台配置、日志、会话和业务数据的持久化事实来源。
 - Qdrant 检索严格按数据源隔离，并具备可重复的真实 Agent RAG `off`/`on` 测量能力；准确率提升必须由扩展后的差异化知识和评测案例实证，当前不作此结论。
 - Redis 可以随时清空或停用，不影响系统数据完整性和核心查询能力。
-- SQLite 与 PostgreSQL 的移除不会破坏现有 API、安全策略和测试。
+- SQLite 运行链路删除、PostgreSQL 可选能力开关不会破坏现有 API、安全策略和测试。

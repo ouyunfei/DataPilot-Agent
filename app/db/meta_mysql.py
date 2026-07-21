@@ -4,41 +4,32 @@ import json
 import uuid
 from contextlib import contextmanager
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from app.db.database import DEFAULT_METRICS, SQLiteDatabase
+from app.core.config import DEFAULT_MYSQL_DATA_SOURCE_URL
+from app.db.database import DEFAULT_METRICS, DataPilotDatabase, SUPPORTED_DATA_SOURCE_TYPES
 from app.db.mysql import MySQLClient
 
 
 DEFAULT_MYSQL_DATA_SOURCE_NAME = "default_mysql"
-DEFAULT_MYSQL_DATA_SOURCE_URL = "mysql://datapilot_ro:datapilot123@127.0.0.1:3307/datapilot"
 DEFAULT_MYSQL_DATA_SOURCE_TABLES = ["orders", "users", "products"]
 
 
-class MySQLMetaDatabase(SQLiteDatabase):
-    """MySQL-backed platform metadata, SQLite kept for demo business data."""
+class MySQLMetaDatabase(DataPilotDatabase):
+    """MySQL-backed platform metadata and default business data-source config."""
 
     def __init__(
         self,
         database_url: str,
-        sqlite_path: str | Path,
         connect: Callable[..., Any] | None = None,
     ) -> None:
-        super().__init__(sqlite_path)
         self.database_url = database_url
         self._client = MySQLClient(database_url, connect=connect)
 
     def initialize(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            SQLiteDatabase._reset_incompatible_schema(conn)
-            SQLiteDatabase._create_tables(conn)
-            self._seed_if_empty(conn)
-            SQLiteDatabase._seed_default_data_source(self, conn)
-            SQLiteDatabase._seed_default_metrics(conn)
         self._create_meta_tables()
         self._seed_mysql_default_data_source()
+        self._execute("DELETE FROM data_sources WHERE db_type = %s", ("sqlite",))
         self._seed_mysql_default_metrics()
 
     def _create_meta_tables(self) -> None:
@@ -108,7 +99,7 @@ class MySQLMetaDatabase(SQLiteDatabase):
 
     def _seed_mysql_default_data_source(self) -> None:
         tables = DEFAULT_MYSQL_DATA_SOURCE_TABLES
-        allowed_columns = SQLiteDatabase._default_allowed_columns(tables)
+        allowed_columns = DataPilotDatabase._default_allowed_columns(tables)
         default_row = self._fetchone(
             """
             SELECT
@@ -137,7 +128,7 @@ class MySQLMetaDatabase(SQLiteDatabase):
             current_allowed_columns = (
                 json.loads(mysql_row["allowed_columns"])
                 if mysql_row["allowed_columns"]
-                else SQLiteDatabase._default_allowed_columns(current_tables)
+                else DataPilotDatabase._default_allowed_columns(current_tables)
             )
             if (
                 mysql_row["db_type"] == "mysql"
@@ -184,7 +175,7 @@ class MySQLMetaDatabase(SQLiteDatabase):
             current_allowed_columns = (
                 json.loads(default_row["allowed_columns"])
                 if default_row["allowed_columns"]
-                else SQLiteDatabase._default_allowed_columns(current_tables)
+                else DataPilotDatabase._default_allowed_columns(current_tables)
             )
             if (
                 default_row["name"] == DEFAULT_MYSQL_DATA_SOURCE_NAME
@@ -363,8 +354,8 @@ class MySQLMetaDatabase(SQLiteDatabase):
         is_default: bool = False,
     ) -> dict[str, Any]:
         db_type = db_type.lower()
-        if db_type not in {"sqlite", "mysql", "postgresql"}:
-            raise ValueError("db_type 只支持 sqlite、mysql、postgresql")
+        if db_type not in SUPPORTED_DATA_SOURCE_TYPES:
+            raise ValueError("db_type 只支持 mysql、postgresql")
         tables = [table.strip().lower() for table in allowed_tables if table.strip()]
         if not tables:
             raise ValueError("allowed_tables 不能为空")

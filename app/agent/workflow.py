@@ -8,7 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 from app.core.config import QUERY_TIMEOUT_SECONDS
-from app.db.database import SQLiteDatabase
+from app.db.database import DataPilotDatabase
 from app.services.insights import recommend_insights
 from app.services.llm import BaseLLMClient
 from app.services.semantic import build_semantic_context, find_trusted_answer, recommend_chart
@@ -50,7 +50,7 @@ class DataAnalysisAgent:
 
     def __init__(
         self,
-        db: SQLiteDatabase,
+        db: DataPilotDatabase,
         llm: BaseLLMClient,
         knowledge: KnowledgeRetriever | None = None,
     ) -> None:
@@ -201,7 +201,7 @@ class DataAnalysisAgent:
     def _generate_sql(self, state: AnalysisState) -> dict[str, str | bool]:
         trusted_answer = (
             find_trusted_answer(state["question"])
-            if state["data_source"]["db_type"] == "sqlite"
+            if state["data_source"]["db_type"] == "mysql"
             else None
         )
         if trusted_answer:
@@ -246,7 +246,6 @@ class DataAnalysisAgent:
                     for table, columns in state["data_source"]["allowed_columns"].items()
                 },
                 dialect={
-                    "sqlite": "sqlite",
                     "postgresql": "postgres",
                     "mysql": "mysql",
                 }[state["data_source"]["db_type"]],
@@ -262,10 +261,10 @@ class DataAnalysisAgent:
         }
 
     def _execute_sql(self, state: AnalysisState) -> dict[str, list[dict[str, Any]] | str | None]:
-        if state["data_source"]["db_type"] not in {"sqlite", "postgresql", "mysql"}:
+        if state["data_source"]["db_type"] not in {"postgresql", "mysql"}:
             return {
                 "data": [],
-                "error": "当前阶段仅支持 SQLite、PostgreSQL 和 MySQL 数据源执行查询",
+                "error": "当前阶段仅支持 MySQL 和 PostgreSQL 数据源执行查询",
                 "error_code": "data_source_error",
             }
 

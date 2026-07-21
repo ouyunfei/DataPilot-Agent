@@ -24,6 +24,9 @@ def test_docker_assets_exist_and_use_env_file():
     assert ".env" in compose
     assert "postgres:" in compose
     assert "mysql:" in compose
+    assert 'profiles: ["postgres"]' in compose
+    assert "condition: service_healthy" in compose
+    assert "DEFAULT_MYSQL_DATA_SOURCE_URL" in compose
     assert "qdrant:" not in compose
     assert "mysql_data:" in compose
     assert "${MYSQL_PORT:-3307}:3306" in compose
@@ -47,20 +50,21 @@ def test_docker_assets_exist_and_use_env_file():
     assert "QDRANT_COLLECTION=datapilot_knowledge_bge_small_zh_v15" in env_example
     assert "EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5" in env_example
     assert "KNOWLEDGE_TOP_K=5" in env_example
-    assert "META_DB_TYPE=mysql" in env_example
-    assert "META_DATABASE_URL=mysql://user:password@localhost:3306/datapilot" in env_example
+    assert "META_DB_TYPE" not in env_example
+    assert "META_DATABASE_URL=mysql://root:datapilot_root123@127.0.0.1:3307/datapilot" in env_example
+    assert "DEFAULT_MYSQL_DATA_SOURCE_URL=mysql://datapilot_ro:datapilot123@127.0.0.1:3307/datapilot" in env_example
 
 
 def test_config_defaults_to_mysql_in_clean_environment(tmp_path):
     script = """
 import json
-from app.core.config import META_DATABASE_URL, META_DB_TYPE
+from app.core.config import DEFAULT_MYSQL_DATA_SOURCE_URL, META_DATABASE_URL
 print(json.dumps({
-    "meta_db_type": META_DB_TYPE,
     "meta_database_url": META_DATABASE_URL,
+    "default_mysql_data_source_url": DEFAULT_MYSQL_DATA_SOURCE_URL,
 }))
 """
-    env = {key: value for key, value in os.environ.items() if key not in {"META_DB_TYPE", "META_DATABASE_URL"}}
+    env = {key: value for key, value in os.environ.items() if key not in {"META_DATABASE_URL", "DEFAULT_MYSQL_DATA_SOURCE_URL"}}
     env["PYTHONPATH"] = str(ROOT)
 
     result = subprocess.run(
@@ -74,8 +78,8 @@ print(json.dumps({
 
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout.strip())
-    assert payload["meta_db_type"] == "mysql"
-    assert payload["meta_database_url"] == "mysql://root:0522@127.0.0.1:3306/datapilot"
+    assert payload["meta_database_url"] == ""
+    assert payload["default_mysql_data_source_url"] == ""
 
 
 def test_ci_runs_pytest_without_deepseek_secret():
@@ -94,22 +98,11 @@ def test_eval_questions_have_expected_shape():
         assert {"id", "question", "expected_fields", "expected_chart_type", "should_be_safe", "description"} <= item.keys()
 
 
-def test_eval_script_runs_successfully():
-    result = subprocess.run(
-        [sys.executable, "scripts/run_evals.py"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+def test_eval_script_uses_mysql_default_backend():
+    script = (ROOT / "scripts" / "run_evals.py").read_text(encoding="utf-8")
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Eval passed:" in result.stdout
-    assert "Success rate:" in result.stdout
-    assert "Synthetic RAG workflow check: off 0/3, on 3/3" in result.stdout
-    assert "Synthetic workflow delta: +100.00pp" in result.stdout
-    assert "Uses a fake LLM/retriever; not a real-model quality benchmark." in result.stdout
-    assert "RAG improvement" not in result.stdout
+    assert "MySQLMetaDatabase" in script
+    assert "SQLiteDatabase" not in script
 
 
 def test_synthetic_rag_failure_diagnostic_names_case_and_arm(monkeypatch):

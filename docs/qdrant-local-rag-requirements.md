@@ -289,7 +289,7 @@ KNOWLEDGE_TOP_K=5
 9. `/api/chat` 返回 `knowledge_sources`。
 10. 危险 SQL 不会因为来自知识库而执行。
 11. 数据库密码和连接地址不会进入 Payload、日志或 API。
-12. SQLite、PostgreSQL、MySQL 和数据源管理原有功能不受影响。
+12. MySQL、PostgreSQL 和数据源管理原有功能不受影响。
 
 最终验证：
 

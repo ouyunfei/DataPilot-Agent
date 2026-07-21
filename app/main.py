@@ -1,4 +1,4 @@
-from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import cast
 
 from fastapi import FastAPI
@@ -10,15 +10,13 @@ from app.core.config import (
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
     DEEPSEEK_TIMEOUT_SECONDS,
-    DEFAULT_DATABASE_PATH,
     EMBEDDING_MODEL,
     KNOWLEDGE_TOP_K,
     META_DATABASE_URL,
-    META_DB_TYPE,
     QDRANT_COLLECTION,
     QDRANT_PATH,
 )
-from app.db.database import SQLiteDatabase
+from app.db.database import DataPilotDatabase
 from app.db.meta_mysql import MySQLMetaDatabase
 from app.schemas.chat import HealthResponse
 from app.services.knowledge import BGEEmbedder, QdrantKnowledgeBase
@@ -29,12 +27,21 @@ _AUTO = object()
 
 
 def create_app(
-    database_path: str | Path | None = None,
+    database_path: object | None = None,
     llm: BaseLLMClient | None = None,
     knowledge: KnowledgeRetriever | None | object = _AUTO,
+    db: DataPilotDatabase | None = None,
+    initialize: bool = True,
 ) -> FastAPI:
-    db = _create_database(database_path or DEFAULT_DATABASE_PATH)
-    db.initialize()
+    database = db or _create_database()
+    if initialize:
+        database.initialize()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if not initialize:
+            database.initialize()
+        yield
 
     if llm is not None:
         llm_client = llm
@@ -60,19 +67,20 @@ def create_app(
             knowledge_client = None
     else:
         knowledge_client = cast(KnowledgeRetriever | None, knowledge)
-    agent = DataAnalysisAgent(db=db, llm=llm_client, knowledge=knowledge_client)
+    agent = DataAnalysisAgent(db=database, llm=llm_client, knowledge=knowledge_client)
 
     app = FastAPI(
         title="DataPilot Agent",
         description="基于 LangGraph 的智能数据分析 Agent 后端 MVP",
         version="0.1.0",
+        lifespan=lifespan,
     )
     app.include_router(create_chat_router(agent))
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         try:
-            table_count = len(db.list_tables())
+            table_count = len(database.list_tables())
             database_status = "ok"
         except Exception:
             table_count = 0
@@ -92,14 +100,10 @@ def _deepseek_configured() -> bool:
     return bool(DEEPSEEK_API_KEY and DEEPSEEK_API_KEY != "your_deepseek_api_key")
 
 
-def _create_database(database_path: str | Path) -> SQLiteDatabase:
-    if META_DB_TYPE == "sqlite":
-        return SQLiteDatabase(database_path)
-    if META_DB_TYPE == "mysql":
-        if not META_DATABASE_URL:
-            raise ValueError("META_DB_TYPE=mysql 时必须配置 META_DATABASE_URL")
-        return MySQLMetaDatabase(META_DATABASE_URL, database_path)
-    raise ValueError("META_DB_TYPE 只支持 sqlite 或 mysql")
+def _create_database() -> DataPilotDatabase:
+    if not META_DATABASE_URL:
+        raise ValueError("必须配置 META_DATABASE_URL")
+    return MySQLMetaDatabase(META_DATABASE_URL)
 
 
-app = create_app()
+app = create_app(initialize=False)
