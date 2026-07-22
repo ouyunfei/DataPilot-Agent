@@ -1,6 +1,6 @@
 # DataPilot Agent
 
-面向业务数据分析的 **自然语言问数后端 Agent**。
+面向业务数据分析的 **智能问数 Agent + ChatBI 前端工作台**。
 
 用户输入中文问题，系统自动理解数据表、生成安全 SQL、查询 MySQL，并返回结构化数据、中文结论、图表建议和规则洞察。
 
@@ -11,6 +11,7 @@
 - **SQL 安全防护**：SQLGlot AST 校验，只允许单条 `SELECT`，强制 `LIMIT 100`，表/字段白名单控制。
 - **语义层 + 可信答案**：指标口径可配置，高频问题可优先命中可信 SQL。
 - **Local RAG**：Qdrant Local + `BAAI/bge-small-zh-v1.5` 召回 Schema、指标、可信 SQL、优质历史问答。
+- **ChatBI 前端**：Vue 3 + Element Plus + ECharts，三栏式智能问数页面，展示 SQL、图表、表格和分析报告。
 - **工程闭环**：FastAPI、Docker Compose、pytest、离线 eval、GitHub Actions CI。
 
 ## 技术栈
@@ -23,6 +24,7 @@
 | 数据库 | MySQL 默认，PostgreSQL 可选 |
 | SQL 安全 | SQLGlot |
 | RAG | Qdrant Local / sentence-transformers |
+| 前端 | Vue 3 / Vite / TypeScript / Element Plus / ECharts |
 | 测试 | pytest / deterministic evals |
 
 ## 快速启动
@@ -45,6 +47,18 @@ docker compose up --build
 - Swagger: <http://127.0.0.1:8000/docs>
 
 Docker 会启动后端和 MySQL，并初始化示例表、平台表、默认指标和默认数据源。
+
+### 前端页面
+
+三栏式 ChatBI 工作台，参考 SQLBot / DataEase 的企业级浅色 BI 交互，不搬运开源项目源码。
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+访问：<http://127.0.0.1:5173>
 
 ### 本地开发
 
@@ -153,6 +167,7 @@ app/
   db/         MySQL / PostgreSQL 数据源与平台元数据库
   services/   LLM、SQL 校验、语义层、RAG、洞察
   schemas/    Pydantic 模型
+frontend/     Vue 3 ChatBI 工作台
 docker/       MySQL / PostgreSQL 初始化脚本
 evals/        Text-to-SQL 评测集
 scripts/      eval 与知识索引脚本
@@ -162,6 +177,4 @@ docs/         设计文档
 
 ## 进一步阅读
 
-- [MVP 设计](docs/mvp-design.md)
-- [Local RAG 需求](docs/qdrant-local-rag-requirements.md)
-- [存储架构路线图](docs/storage-architecture-roadmap.md)
+- [项目路线图](docs/roadmap.md)

@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from typing import cast
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent.workflow import DataAnalysisAgent, KnowledgeRetriever
 from app.api.routes import create_chat_router
@@ -74,6 +75,12 @@ def create_app(
         description="基于 LangGraph 的智能数据分析 Agent 后端 MVP",
         version="0.1.0",
         lifespan=lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
     app.include_router(create_chat_router(agent))
 
